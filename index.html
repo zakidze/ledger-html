@@ -3889,11 +3889,67 @@ OUTPUT SCHEMA (STRICT JSON ONLY):
     // =========================================================================
     // SAVED COMPANIES & LEADS IMPLEMENTATION
     // =========================================================================
+    function formatIcpScore(score) {
+      if (score === null || score === undefined) return "Medium";
+      if (typeof score === "number") {
+        if (score >= 80 || (score <= 10 && score >= 8)) return "High";
+        if (score >= 60 || (score <= 10 && score >= 6)) return "Medium-High";
+        return "Medium";
+      }
+      const str = String(score).trim();
+      if (!str || str === "[object Object]") return "Medium";
+      const lower = str.toLowerCase();
+      if (lower.includes("medium-high") || lower.includes("med-high") || lower.includes("medium high")) return "Medium-High";
+      if (lower.includes("high")) return "High";
+      if (lower.includes("medium") || lower.includes("med")) return "Medium";
+      if (lower.includes("low")) return "Medium";
+      const numMatch = str.match(/\b(\d+(?:\.\d+)?)\b/);
+      if (numMatch) {
+        const val = parseFloat(numMatch[1]);
+        if (val >= 80 || (val <= 10 && val >= 8)) return "High";
+        if (val >= 60 || (val <= 10 && val >= 6)) return "Medium-High";
+        return "Medium";
+      }
+      return str.charAt(0).toUpperCase() + str.slice(1);
+    }
+
+    function normalizeLead(raw) {
+      if (!raw || typeof raw !== "object") return null;
+
+      const company_name = String(raw.company_name || "").trim();
+      if (!company_name) return null;
+
+      let domain = String(raw.domain || "").trim();
+      let website_url = String(raw.website_url || "").trim();
+      if (!domain && website_url) {
+        domain = website_url.replace(/^https?:\/\//i, '').split('/')[0].trim();
+      }
+      if (!website_url && domain) {
+        website_url = `https://${domain}`;
+      }
+
+      return {
+        company_name,
+        domain: domain || (company_name.toLowerCase().replace(/[^a-z0-9]/g, '') + ".com"),
+        website_url: website_url || "",
+        us_state: String(raw.us_state || "US").trim(),
+        founded_year: (raw.founded_year !== undefined && raw.founded_year !== null && String(raw.founded_year).trim()) ? String(raw.founded_year).trim() : "N/A",
+        est_revenue_and_size: String(raw.est_revenue_and_size || "$1M–$10M ARR / 15-30 employees").trim(),
+        target_person_name: String(raw.target_person_name || "Founder / Executive").trim(),
+        target_person_title: String(raw.target_person_title || "Founder / COO").trim(),
+        trigger_reason: String(raw.trigger_reason || "Multi-channel retail expansion").trim(),
+        verified_source_link: String(raw.verified_source_link || website_url || "").trim(),
+        verified_quote: String(raw.verified_quote || "").trim(),
+        icp_score: formatIcpScore(raw.icp_score),
+        score_justification: String(raw.score_justification || "Matches outbound ICP criteria.").trim()
+      };
+    }
+
     function loadLeadsFromStorage() {
       try {
         const stored = localStorage.getItem(LEADS_STORAGE);
-        leads = stored ? JSON.parse(stored) : [];
-        if (!Array.isArray(leads)) leads = [];
+        const parsed = stored ? JSON.parse(stored) : [];
+        leads = Array.isArray(parsed) ? parsed.map(normalizeLead).filter(Boolean) : [];
       } catch (e) {
         leads = [];
       }
@@ -3910,11 +3966,15 @@ OUTPUT SCHEMA (STRICT JSON ONLY):
     function loadSavedCompaniesFromStorage() {
       try {
         const stored = localStorage.getItem(SAVED_COMPANIES_STORAGE);
-        savedCompanies = stored ? JSON.parse(stored) : [];
-        if (!Array.isArray(savedCompanies) || savedCompanies.length === 0) {
-          savedCompanies = [SAMPLE_BALA_COMPANY];
-          localStorage.setItem(SAVED_COMPANIES_STORAGE, JSON.stringify(savedCompanies));
-        }
+        const parsed = stored ? JSON.parse(stored) : [];
+        savedCompanies = Array.isArray(parsed) && parsed.length > 0
+          ? parsed.map(c => ({
+              ...c,
+              company_name: String(c.company_name || "").trim(),
+              domain: String(c.domain || "").trim(),
+              icp_score: formatIcpScore(c.icp_score)
+            })).filter(c => c && c.company_name)
+          : [SAMPLE_BALA_COMPANY];
       } catch (e) {
         savedCompanies = [SAMPLE_BALA_COMPANY];
       }
@@ -3957,7 +4017,8 @@ OUTPUT SCHEMA (STRICT JSON ONLY):
 
     function findSavedCompanyByName(name) {
       if (!name) return null;
-      return savedCompanies.find(c => c.company_name.toLowerCase().trim() === name.toLowerCase().trim());
+      const target = String(name).toLowerCase().trim();
+      return savedCompanies.find(c => String(c.company_name || "").toLowerCase().trim() === target);
     }
 
     function updateCompanyDropdowns() {
@@ -4037,10 +4098,10 @@ OUTPUT SCHEMA (STRICT JSON ONLY):
 
       const highFitCount = document.getElementById("highFitCount");
       if (highFitCount) {
-        highFitCount.textContent = leads.filter(l => 
-          (l.icp_score || "").toLowerCase().includes("high") && 
-          !(l.icp_score || "").toLowerCase().includes("medium-high")
-        ).length;
+        highFitCount.textContent = leads.filter(l => {
+          const sc = formatIcpScore(l && l.icp_score).toLowerCase();
+          return sc.includes("high") && !sc.includes("medium-high");
+        }).length;
       }
 
       updateCalendarMetrics();
@@ -4178,7 +4239,7 @@ OUTPUT SCHEMA (STRICT JSON ONLY):
 
       showStatus(`Researching ${batchCount} verified leads in "${activeNiche}"...`, "loading");
 
-      const existingNames = leads.map(l => (l.company_name || "").toLowerCase().trim()).filter(Boolean);
+      const existingNames = leads.map(l => String(l && l.company_name || "").toLowerCase().trim()).filter(Boolean);
 
       const criteriaList = [];
       if (selectedState !== "ANY") criteriaList.push(`- US State / Location: Headquartered or operating in ${selectedState}.`);
@@ -4189,12 +4250,13 @@ OUTPUT SCHEMA (STRICT JSON ONLY):
       if (selectedTrigger !== "ANY") criteriaList.push(`- Trigger Focus: ${selectedTrigger}.`);
 
       const systemPrompt = `You are an expert B2B Outbound Research Agent for Ledgerwise, a specialized US bookkeeping firm for e-commerce brands ($1M-$10M ARR, 5-50 staff).
-Find and qualify real companies matching ICP. Return STRICTLY a valid JSON array of objects with keys: company_name, domain, website_url, us_state, founded_year, est_revenue_and_size, target_person_name, target_person_title, trigger_reason, verified_source_link, verified_quote, icp_score, score_justification.`;
+Find and qualify real companies matching ICP. Return STRICTLY a valid JSON array of objects with keys: company_name, domain, website_url, us_state, founded_year, est_revenue_and_size, target_person_name, target_person_title, trigger_reason, verified_source_link, verified_quote, icp_score, score_justification.
+IMPORTANT FOR "icp_score": Must be strictly one of: "High", "Medium-High", or "Medium".`;
 
       const userPrompt = `Find exactly ${batchCount} NEW distinct e-commerce brands matching:
 TARGET NICHE: ${activeNiche}
 SEARCH CRITERIA:
-${criteriaList.join("\\n")}
+${criteriaList.join("\n")}
 ${existingNames.length > 0 ? `EXCLUSIONS: ${JSON.stringify(existingNames.slice(-30))}` : ""}`;
 
       try {
@@ -4221,9 +4283,10 @@ ${existingNames.length > 0 ? `EXCLUSIONS: ${JSON.stringify(existingNames.slice(-
         }
 
         let addedCount = 0;
-        newLeads.forEach(item => {
-          if (!item.company_name) return;
-          const exists = leads.some(l => l.company_name.toLowerCase().trim() === item.company_name.toLowerCase().trim());
+        newLeads.forEach(rawItem => {
+          const item = normalizeLead(rawItem);
+          if (!item || !item.company_name) return;
+          const exists = leads.some(l => String(l && l.company_name || "").toLowerCase().trim() === item.company_name.toLowerCase().trim());
           if (!exists) {
             leads.unshift(item);
             addedCount++;
@@ -4312,28 +4375,40 @@ ${existingNames.length > 0 ? `EXCLUSIONS: ${JSON.stringify(existingNames.slice(-
     }
 
     function extractJsonArray(rawText) {
+      if (!rawText) throw new Error("Empty response from AI model.");
       const clean = rawText.trim();
-      try {
-        const parsed = JSON.parse(clean);
-        if (Array.isArray(parsed)) return parsed;
-        if (parsed.companies && Array.isArray(parsed.companies)) return parsed.companies;
-      } catch (e) {}
 
-      const fence = clean.match(/```(?:json)?\\s*([\\s\\S]*?)\\s*```/i);
-      if (fence && fence[1]) {
+      const tryParse = (str) => {
         try {
-          const parsed = JSON.parse(fence[1].trim());
+          const parsed = JSON.parse(str);
           if (Array.isArray(parsed)) return parsed;
+          if (parsed && typeof parsed === "object") {
+            if (Array.isArray(parsed.companies)) return parsed.companies;
+            if (Array.isArray(parsed.leads)) return parsed.leads;
+            if (Array.isArray(parsed.data)) return parsed.data;
+            if (Array.isArray(parsed.results)) return parsed.results;
+            if (Array.isArray(parsed.items)) return parsed.items;
+            const anyArray = Object.values(parsed).find(v => Array.isArray(v));
+            if (anyArray) return anyArray;
+          }
         } catch (e) {}
+        return null;
+      };
+
+      let res = tryParse(clean);
+      if (res) return res;
+
+      const fence = clean.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+      if (fence && fence[1]) {
+        res = tryParse(fence[1].trim());
+        if (res) return res;
       }
 
       const s = clean.indexOf("[");
       const e = clean.lastIndexOf("]");
       if (s !== -1 && e !== -1 && e > s) {
-        try {
-          const parsed = JSON.parse(clean.substring(s, e + 1));
-          if (Array.isArray(parsed)) return parsed;
-        } catch (e) {}
+        res = tryParse(clean.substring(s, e + 1));
+        if (res) return res;
       }
       throw new Error("Unable to parse structured JSON array from model output.");
     }
@@ -4352,15 +4427,15 @@ ${existingNames.length > 0 ? `EXCLUSIONS: ${JSON.stringify(existingNames.slice(-
 
       const filtered = leads.filter(item => {
         if (filterText) {
-          const pool = [item.company_name, item.domain, item.website_url, item.us_state, item.target_person_name, item.trigger_reason].filter(Boolean).join(" ").toLowerCase();
+          const pool = [item.company_name, item.domain, item.website_url, item.us_state, item.target_person_name, item.trigger_reason].filter(Boolean).map(String).join(" ").toLowerCase();
           if (!pool.includes(filterText)) return false;
         }
         if (stateFilter !== "ALL") {
-          const st = (item.us_state || "").toUpperCase();
+          const st = String(item.us_state || "").toUpperCase();
           if (!st.includes(stateFilter.toUpperCase())) return false;
         }
         if (scoreFilter !== "ALL") {
-          const sc = (item.icp_score || "").toLowerCase();
+          const sc = formatIcpScore(item.icp_score).toLowerCase();
           if (scoreFilter === "High" && (!sc.includes("high") || sc.includes("medium-high"))) return false;
           if (scoreFilter === "Medium-High" && !sc.includes("medium-high")) return false;
           if (scoreFilter === "Medium" && (!sc.includes("medium") || sc.includes("high"))) return false;
@@ -4376,14 +4451,14 @@ ${existingNames.length > 0 ? `EXCLUSIONS: ${JSON.stringify(existingNames.slice(-
 
       filtered.forEach((item, index) => {
         const tr = document.createElement("tr");
-        const isSaved = savedCompanies.some(c => c.company_name.toLowerCase().trim() === (item.company_name || "").toLowerCase().trim());
+        const isSaved = savedCompanies.some(c => String(c && c.company_name || "").toLowerCase().trim() === String(item && item.company_name || "").toLowerCase().trim());
 
-        const scoreStr = (item.icp_score || "Medium").toLowerCase();
+        const scoreStr = formatIcpScore(item.icp_score).toLowerCase();
         let badgeClass = "badge-medium";
         if (scoreStr === "high" || (scoreStr.includes("high") && !scoreStr.includes("medium-high"))) badgeClass = "badge-high";
         else if (scoreStr.includes("medium-high")) badgeClass = "badge-medium-high";
 
-        const domainDisplay = item.domain || (item.website_url ? item.website_url.replace(/^https?:\/\//i, '').split('/')[0] : '');
+        const domainDisplay = item.domain || (item.website_url ? String(item.website_url).replace(/^https?:\/\//i, '').split('/')[0] : '');
 
         tr.innerHTML = `
           <td style="color: var(--text-muted); font-size: 0.8rem; font-weight: 600;">${index + 1}</td>
@@ -4402,17 +4477,17 @@ ${existingNames.length > 0 ? `EXCLUSIONS: ${JSON.stringify(existingNames.slice(-
             <div style="font-weight: 500; color: #f1f5f9;">${escapeHtml(item.trigger_reason || "Expansion")}</div>
             ${item.verified_quote ? `<div class="quote-box">"${escapeHtml(item.verified_quote)}"</div>` : ""}
           </td>
-          <td><span class="badge ${badgeClass}">${escapeHtml(item.icp_score || "Medium")}</span></td>
+          <td><span class="badge ${badgeClass}">${escapeHtml(formatIcpScore(item.icp_score))}</span></td>
           <td style="max-width: 240px; font-size: 0.78rem; color: #cbd5e1;">${escapeHtml(item.score_justification || "Matches ICP.")}</td>
           <td>
             <div class="lead-row-actions">
-              <button class="row-save-btn ${isSaved ? 'is-saved' : ''}" onclick="onSaveLeadBtnClick('${escapeHtml(item.company_name)}')">
+              <button class="row-save-btn ${isSaved ? 'is-saved' : ''}" onclick="onSaveLeadBtnClick('${escapeJsStr(item.company_name)}')">
                 ${isSaved ? '⭐ Saved ✓' : '⭐ Save Company'}
               </button>
-              <button class="row-draft-btn" onclick="onDraftLeadShortcut('${escapeHtml(item.company_name)}')">
+              <button class="row-draft-btn" onclick="onDraftLeadShortcut('${escapeJsStr(item.company_name)}')">
                 ✍️ Draft Email ➔
               </button>
-              <button class="row-delete-btn" onclick="onDeleteLead('${escapeHtml(item.company_name)}')" title="Remove">✕</button>
+              <button class="row-delete-btn" onclick="onDeleteLead('${escapeJsStr(item.company_name)}')" title="Remove">✕</button>
             </div>
           </td>
         `;
@@ -4423,12 +4498,13 @@ ${existingNames.length > 0 ? `EXCLUSIONS: ${JSON.stringify(existingNames.slice(-
     }
 
     function onSaveLeadBtnClick(companyName) {
-      const leadItem = leads.find(l => l.company_name === companyName);
+      const cleanName = String(companyName || "").toLowerCase().trim();
+      const leadItem = leads.find(l => String(l && l.company_name || "").toLowerCase().trim() === cleanName);
       if (!leadItem) return;
 
-      const existing = savedCompanies.find(c => c.company_name.toLowerCase().trim() === companyName.toLowerCase().trim());
+      const existing = savedCompanies.find(c => String(c && c.company_name || "").toLowerCase().trim() === cleanName);
       if (existing) {
-        showToast(`"${companyName}" is already in your Saved Companies list.`, 
+        showToast(`"${leadItem.company_name}" is already in your Saved Companies list.`, 
           `<button class="btn btn-accent btn-small" onclick="switchView('saved')">View Pipeline ➔</button>`
         );
         return;
@@ -4447,7 +4523,7 @@ ${existingNames.length > 0 ? `EXCLUSIONS: ${JSON.stringify(existingNames.slice(-
         trigger_reason: leadItem.trigger_reason || 'Channel growth',
         verified_source_link: leadItem.verified_source_link || '',
         verified_quote: leadItem.verified_quote || '',
-        icp_score: leadItem.icp_score || 'High',
+        icp_score: formatIcpScore(leadItem.icp_score),
         score_justification: leadItem.score_justification || '',
         status: 'SAVED',
         saved_at: new Date().toISOString()
@@ -4464,10 +4540,11 @@ ${existingNames.length > 0 ? `EXCLUSIONS: ${JSON.stringify(existingNames.slice(-
     }
 
     function onDraftLeadShortcut(companyName) {
-      let company = savedCompanies.find(c => c.company_name.toLowerCase().trim() === companyName.toLowerCase().trim());
+      const cleanName = String(companyName || "").toLowerCase().trim();
+      let company = savedCompanies.find(c => String(c && c.company_name || "").toLowerCase().trim() === cleanName);
       if (!company) {
         onSaveLeadBtnClick(companyName);
-        company = savedCompanies.find(c => c.company_name.toLowerCase().trim() === companyName.toLowerCase().trim());
+        company = savedCompanies.find(c => String(c && c.company_name || "").toLowerCase().trim() === cleanName);
       }
       if (company) {
         setActiveCompany(company, true);
@@ -4476,7 +4553,8 @@ ${existingNames.length > 0 ? `EXCLUSIONS: ${JSON.stringify(existingNames.slice(-
     }
 
     function onDeleteLead(companyName) {
-      leads = leads.filter(l => l.company_name !== companyName);
+      const cleanName = String(companyName || "").toLowerCase().trim();
+      leads = leads.filter(l => String(l && l.company_name || "").toLowerCase().trim() !== cleanName);
       persistLeads();
     }
 
@@ -4487,9 +4565,9 @@ ${existingNames.length > 0 ? `EXCLUSIONS: ${JSON.stringify(existingNames.slice(-
         escapeCsv(l.company_name), escapeCsv(l.domain), escapeCsv(l.website_url),
         escapeCsv(l.us_state), escapeCsv(l.founded_year), escapeCsv(l.est_revenue_and_size),
         escapeCsv(l.target_person_name), escapeCsv(l.target_person_title),
-        escapeCsv(l.trigger_reason), escapeCsv(l.icp_score)
+        escapeCsv(l.trigger_reason), escapeCsv(formatIcpScore(l.icp_score))
       ].join(","));
-      downloadFile(`ledgerwise_leads_${new Date().toISOString().slice(0,10)}.csv`, [headers.join(","), ...rows].join("\\n"), "text/csv;charset=utf-8;");
+      downloadFile(`ledgerwise_leads_${new Date().toISOString().slice(0,10)}.csv`, [headers.join(","), ...rows].join("\n"), "text/csv;charset=utf-8;");
     }
 
     function openJsonModal() {
@@ -4521,12 +4599,12 @@ ${existingNames.length > 0 ? `EXCLUSIONS: ${JSON.stringify(existingNames.slice(-
 
       const filtered = savedCompanies.filter(comp => {
         if (query) {
-          const pool = [comp.company_name, comp.domain, comp.target_person_name, comp.trigger_reason].filter(Boolean).join(" ").toLowerCase();
+          const pool = [comp.company_name, comp.domain, comp.target_person_name, comp.trigger_reason].filter(Boolean).map(String).join(" ").toLowerCase();
           if (!pool.includes(query)) return false;
         }
         if (statusFilter !== "ALL" && comp.status !== statusFilter) return false;
         if (scoreFilter !== "ALL") {
-          const sc = (comp.icp_score || "").toLowerCase();
+          const sc = formatIcpScore(comp.icp_score).toLowerCase();
           if (scoreFilter === "High" && (!sc.includes("high") || sc.includes("medium-high"))) return false;
           if (scoreFilter === "Medium-High" && !sc.includes("medium-high")) return false;
           if (scoreFilter === "Medium" && (!sc.includes("medium") || sc.includes("high"))) return false;
@@ -4543,7 +4621,7 @@ ${existingNames.length > 0 ? `EXCLUSIONS: ${JSON.stringify(existingNames.slice(-
 
       filtered.forEach(comp => {
         const isCurrentActive = activeCompany && activeCompany.company_name === comp.company_name;
-        const scoreStr = (comp.icp_score || "Medium").toLowerCase();
+        const scoreStr = formatIcpScore(comp.icp_score).toLowerCase();
         let badgeClass = "badge-medium";
         if (scoreStr.includes("high") && !scoreStr.includes("medium-high")) badgeClass = "badge-high";
         else if (scoreStr.includes("medium-high")) badgeClass = "badge-medium-high";
@@ -4562,7 +4640,7 @@ ${existingNames.length > 0 ? `EXCLUSIONS: ${JSON.stringify(existingNames.slice(-
               ${comp.domain ? `<span class="domain-badge">${escapeHtml(comp.domain)}</span>` : ""}
             </div>
             
-            <select class="status-select-pill" onchange="updateSavedCompanyStatus('${escapeHtml(comp.company_name)}', this.value)">
+            <select class="status-select-pill" onchange="updateSavedCompanyStatus('${escapeJsStr(comp.company_name)}', this.value)">
               <option value="SAVED" ${comp.status === 'SAVED' ? 'selected' : ''}>🟡 Saved</option>
               <option value="DRAFTED" ${comp.status === 'DRAFTED' ? 'selected' : ''}>🔵 Drafted</option>
               <option value="SENT" ${comp.status === 'SENT' ? 'selected' : ''}>🟣 Sent</option>
@@ -4575,7 +4653,7 @@ ${existingNames.length > 0 ? `EXCLUSIONS: ${JSON.stringify(existingNames.slice(-
             <div class="saved-meta-row">
               <span class="state-pill">📍 ${escapeHtml(comp.us_state || 'US')}</span>
               <span class="year-pill">🗓️ ${escapeHtml(String(comp.founded_year || 'N/A'))}</span>
-              <span class="badge ${badgeClass}">${escapeHtml(comp.icp_score || 'High')}</span>
+              <span class="badge ${badgeClass}">${escapeHtml(formatIcpScore(comp.icp_score))}</span>
               <span style="font-size: 0.75rem; color: #94a3b8;">${escapeHtml(comp.est_revenue_and_size || '$5M–$10M')}</span>
             </div>
 
@@ -4591,13 +4669,13 @@ ${existingNames.length > 0 ? `EXCLUSIONS: ${JSON.stringify(existingNames.slice(-
           </div>
 
           <div class="saved-card-actions">
-            <button class="btn btn-accent btn-small" onclick="selectCompanyForDrafting('${escapeHtml(comp.company_name)}')">
+            <button class="btn btn-accent btn-small" onclick="selectCompanyForDrafting('${escapeJsStr(comp.company_name)}')">
               ✍️ Draft Email ➔
             </button>
-            <button class="btn btn-outline btn-small" onclick="openChatForSavedCompany('${escapeHtml(comp.company_name)}')">
+            <button class="btn btn-outline btn-small" onclick="openChatForSavedCompany('${escapeJsStr(comp.company_name)}')">
               💬 Chat / Inbox
             </button>
-            <button class="row-delete-btn" onclick="removeSavedCompany('${escapeHtml(comp.company_name)}')" title="Delete from saved">
+            <button class="row-delete-btn" onclick="removeSavedCompany('${escapeJsStr(comp.company_name)}')" title="Delete from saved">
               🗑️
             </button>
           </div>
@@ -4628,9 +4706,10 @@ ${existingNames.length > 0 ? `EXCLUSIONS: ${JSON.stringify(existingNames.slice(-
     }
 
     function removeSavedCompany(companyName) {
+      const cleanName = String(companyName || "").toLowerCase().trim();
       if (confirm(`Remove "${companyName}" from your Saved list?`)) {
-        savedCompanies = savedCompanies.filter(c => c.company_name !== companyName);
-        if (activeCompany && activeCompany.company_name === companyName) {
+        savedCompanies = savedCompanies.filter(c => String(c && c.company_name || "").toLowerCase().trim() !== cleanName);
+        if (activeCompany && String(activeCompany.company_name || "").toLowerCase().trim() === cleanName) {
           activeCompany = savedCompanies[0] || null;
         }
         persistSavedCompanies();
@@ -4660,7 +4739,7 @@ ${existingNames.length > 0 ? `EXCLUSIONS: ${JSON.stringify(existingNames.slice(-
         target_person_title: document.getElementById("manualPersonaTitle").value.trim() || "CEO / Owner",
         est_revenue_and_size: document.getElementById("manualRevenue").value.trim() || "$5M–$10M",
         trigger_reason: document.getElementById("manualTrigger").value.trim() || "E-commerce expansion",
-        icp_score: document.getElementById("manualScore").value,
+        icp_score: formatIcpScore(document.getElementById("manualScore").value),
         status: "SAVED",
         saved_at: new Date().toISOString(),
         us_state: "US",
@@ -4680,9 +4759,9 @@ ${existingNames.length > 0 ? `EXCLUSIONS: ${JSON.stringify(existingNames.slice(-
       const rows = savedCompanies.map(c => [
         escapeCsv(c.company_name), escapeCsv(c.domain), escapeCsv(c.status),
         escapeCsv(c.target_person_name), escapeCsv(c.target_person_title),
-        escapeCsv(c.trigger_reason), escapeCsv(c.icp_score)
+        escapeCsv(c.trigger_reason), escapeCsv(formatIcpScore(c.icp_score))
       ].join(","));
-      downloadFile(`ledgerwise_saved_pipeline_${new Date().toISOString().slice(0,10)}.csv`, [headers.join(","), ...rows].join("\\n"), "text/csv;charset=utf-8;");
+      downloadFile(`ledgerwise_saved_pipeline_${new Date().toISOString().slice(0,10)}.csv`, [headers.join(","), ...rows].join("\n"), "text/csv;charset=utf-8;");
     }
 
     // =========================================================================
@@ -4698,7 +4777,7 @@ ${existingNames.length > 0 ? `EXCLUSIONS: ${JSON.stringify(existingNames.slice(-
       const personaName = activeCompany.target_person_name || "there";
       const personaRole = activeCompany.target_person_title || "Executive";
       const domain = activeCompany.domain || "ecom.com";
-      const userPrefix = personaName.toLowerCase().replace(/[^a-z]/g, '') || "coo";
+      const userPrefix = String(personaName).toLowerCase().replace(/[^a-z]/g, '') || "coo";
       if (emailToField) emailToField.value = `${personaName} <${userPrefix}@${domain}>`;
 
       const payloadObj = {
@@ -4717,7 +4796,7 @@ ${existingNames.length > 0 ? `EXCLUSIONS: ${JSON.stringify(existingNames.slice(-
           source_url: activeCompany.verified_source_link || activeCompany.website_url || `https://${activeCompany.domain}`,
           exact_quote: activeCompany.verified_quote || activeCompany.trigger_reason || "Expanding store presence"
         },
-        fit_context: `${activeCompany.icp_score || 'High'} Fit`
+        fit_context: `${formatIcpScore(activeCompany.icp_score)} Fit`
       };
 
       if (payloadInput) payloadInput.value = JSON.stringify(payloadObj, null, 2);
@@ -5036,7 +5115,7 @@ ${existingNames.length > 0 ? `EXCLUSIONS: ${JSON.stringify(existingNames.slice(-
     function cacheIntelForCompany(companyName, data) {
       try {
         const store = JSON.parse(localStorage.getItem(COMPANY_INTEL_STORAGE) || "{}");
-        store[companyName.toLowerCase().trim()] = data;
+        store[String(companyName || "").toLowerCase().trim()] = data;
         localStorage.setItem(COMPANY_INTEL_STORAGE, JSON.stringify(store));
       } catch (e) {}
     }
@@ -5045,7 +5124,7 @@ ${existingNames.length > 0 ? `EXCLUSIONS: ${JSON.stringify(existingNames.slice(-
       if (!activeCompany) return;
       try {
         const store = JSON.parse(localStorage.getItem(COMPANY_INTEL_STORAGE) || "{}");
-        const cached = store[activeCompany.company_name.toLowerCase().trim()];
+        const cached = store[String(activeCompany.company_name || "").toLowerCase().trim()];
         if (cached) {
           currentIntelData = cached;
           renderCompanyIntel(cached);
@@ -5106,7 +5185,7 @@ ${existingNames.length > 0 ? `EXCLUSIONS: ${JSON.stringify(existingNames.slice(-
       const compName = activeCompany ? activeCompany.company_name : "Bala";
       const domain = activeCompany ? activeCompany.domain : "shopbala.com";
       const pName = activeCompany ? (activeCompany.target_person_name || "there") : "there";
-      const userPrefix = pName.toLowerCase().replace(/[^a-z]/g, '') || "coo";
+      const userPrefix = String(pName).toLowerCase().replace(/[^a-z]/g, '') || "coo";
       const recipientEmail = `${userPrefix}@${domain}`;
 
       if (activeCompany) {
@@ -5141,7 +5220,7 @@ ${existingNames.length > 0 ? `EXCLUSIONS: ${JSON.stringify(existingNames.slice(-
       if (!activeCompany) return;
       try {
         const store = JSON.parse(localStorage.getItem(COMPANY_THREADS_STORAGE) || "{}");
-        const compThread = store[activeCompany.company_name.toLowerCase().trim()];
+        const compThread = store[String(activeCompany.company_name || "").toLowerCase().trim()];
         if (compThread && Array.isArray(compThread) && compThread.length > 0) {
           threadMessages = compThread;
         } else {
@@ -5156,7 +5235,7 @@ ${existingNames.length > 0 ? `EXCLUSIONS: ${JSON.stringify(existingNames.slice(-
               to: `coo@${domain}`,
               senderName: "Alex at Ledgerwise",
               subject: `${compName}'s retail expansion & inventory accounting`,
-              body: `Hey ${pName},\\n\\nSaw ${compName}'s recent retail push into Target and big-box distribution—huge milestone.\\n\\nExpanding into retail usually creates serious inventory and COGS reconciliation bottlenecks, especially keeping track of wholesale chargebacks alongside Shopify DTC payouts. Ledgerwise handles monthly closes exclusively for high-growth e-commerce brands navigating that exact shift.\\n\\nOpen to a brief 15-minute chat ${proposalWindow} to compare notes on how your finance team is managing the multi-channel close?\\n\\nBest,\\nAlex | Ledgerwise`,
+              body: `Hey ${pName},\n\nSaw ${compName}'s recent retail push into Target and big-box distribution—huge milestone.\n\nExpanding into retail usually creates serious inventory and COGS reconciliation bottlenecks, especially keeping track of wholesale chargebacks alongside Shopify DTC payouts. Ledgerwise handles monthly closes exclusively for high-growth e-commerce brands navigating that exact shift.\n\nOpen to a brief 15-minute chat ${proposalWindow} to compare notes on how your finance team is managing the multi-channel close?\n\nBest,\nAlex | Ledgerwise`,
               time: "Yesterday, 2:15 PM"
             }
           ];
@@ -5169,7 +5248,7 @@ ${existingNames.length > 0 ? `EXCLUSIONS: ${JSON.stringify(existingNames.slice(-
       if (!activeCompany) return;
       try {
         const store = JSON.parse(localStorage.getItem(COMPANY_THREADS_STORAGE) || "{}");
-        store[activeCompany.company_name.toLowerCase().trim()] = threadMessages;
+        store[String(activeCompany.company_name || "").toLowerCase().trim()] = threadMessages;
         localStorage.setItem(COMPANY_THREADS_STORAGE, JSON.stringify(store));
         localStorage.setItem(THREAD_STORAGE, JSON.stringify(threadMessages));
       } catch (e) {}
@@ -5295,7 +5374,7 @@ ${existingNames.length > 0 ? `EXCLUSIONS: ${JSON.stringify(existingNames.slice(-
 
       const pMsg = {
         id: "msg_" + Date.now(),
-        from: `${pName.toLowerCase().replace(/[^a-z]/g, '')}@${domain}`,
+        from: `${String(pName).toLowerCase().replace(/[^a-z]/g, '') || "prospect"}@${domain}`,
         to: "alex@ledgerwise.com",
         senderName: `${pName} (${compName})`,
         subject: `Re: ${threadMessages[0]?.subject || 'Bookkeeping close'}`,
@@ -5744,6 +5823,16 @@ Return JSON schema: {"rule_applied_note":"string","intent_detected":"string","su
     function escapeHtml(str) {
       if (!str) return "";
       return String(str).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
+    }
+
+    function escapeJsStr(str) {
+      if (!str) return "";
+      return String(str)
+        .replace(/\\/g, "\\\\")
+        .replace(/'/g, "\\'")
+        .replace(/"/g, "&quot;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
     }
 
     function escapeCsv(val) {
