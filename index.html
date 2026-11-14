@@ -1654,7 +1654,7 @@
 
       <div class="input-field-group">
         <label for="globalApiKeyInput">API Key</label>
-        <input type="password" id="globalApiKeyInput" placeholder="BazaarLink Key" />
+        <input type="password" id="globalApiKeyInput" placeholder="BazaarLink Key" value="sk-bl-OYtAzp3Xolq6nauQnsorSLhngnI7VqFy24mA-eQ4KyUzFsKp" />
         <button type="button" class="icon-btn" id="toggleGlobalKeyVisibility" title="Toggle visibility">👁️</button>
       </div>
     </div>
@@ -2473,22 +2473,15 @@
        Workflow: Find Lead ➜ Save ➜ Draft Email ➜ Send Email ➜ Chat ➜ Calendar
        ========================================================================== */
 
+    // BazaarLink Direct AI Engine Defaults (cURL: https://api.bazaarlink.ai/v1/chat/completions)
+    const BAZAARLINK_ENDPOINT = "https://api.bazaarlink.ai/v1/chat/completions";
+    const BAZAARLINK_API_KEY = "sk-bl-OYtAzp3Xolq6nauQnsorSLhngnI7VqFy24mA-eQ4KyUzFsKp";
+    const BAZAARLINK_MODEL = "qwen/qwen3.7-flash:free";
+
     // LocalStorage Keys
-    const API_ENDPOINT = "https://api.bazaarlink.ai/v1/chat/completions";
+    const API_ENDPOINT = BAZAARLINK_ENDPOINT;
     const API_KEY_STORAGE = "bazaarlink_api_key";
     const MODEL_STORAGE = "bazaarlink_selected_model";
-
-    function getEffectiveApiEndpoint(apiKey) {
-      if (!apiKey) return API_ENDPOINT;
-      const key = apiKey.trim();
-      if (key.startsWith("sk-or-")) {
-        return "https://openrouter.ai/api/v1/chat/completions";
-      }
-      if (key.startsWith("sk-proj-") || (key.startsWith("sk-") && !key.startsWith("sk-bazaar"))) {
-        return "https://api.openai.com/v1/chat/completions";
-      }
-      return API_ENDPOINT;
-    }
     const LEADS_STORAGE = "ledgerwise_saved_leads";
     const SAVED_COMPANIES_STORAGE = "ledgerwise_saved_companies";
     const SELECTED_COMPANY_STORAGE = "ledgerwise_selected_company";
@@ -3739,8 +3732,147 @@ OUTPUT SCHEMA (STRICT JSON ONLY):
     }
 
     // =========================================================================
-    // GLOBAL CONFIG & MODEL
+    // BAZAARLINK AI ENGINE & SCORE NORMALIZATION
     // =========================================================================
+    function normalizeIcpScore(raw) {
+      if (raw === null || raw === undefined) return "Medium";
+      if (typeof raw === "object") {
+        raw = raw.score || raw.rating || raw.val || raw.value || raw.level || "Medium";
+      }
+      if (typeof raw === "number") {
+        if (raw >= 80 || (raw <= 10 && raw >= 7.5)) return "High";
+        if (raw >= 60 || (raw <= 10 && raw >= 5.5)) return "Medium-High";
+        return "Medium";
+      }
+      const str = String(raw).trim();
+      const lower = str.toLowerCase();
+      if (lower.includes("medium-high") || lower.includes("med-high") || lower.includes("medium high") || lower.includes("medium_high")) {
+        return "Medium-High";
+      }
+      if (lower.includes("high")) {
+        return "High";
+      }
+      if (lower.includes("medium") || lower.includes("med")) {
+        return "Medium";
+      }
+      if (lower.includes("low")) {
+        return "Medium";
+      }
+      const match = lower.match(/^(\d+(?:\.\d+)?)/);
+      if (match) {
+        const num = parseFloat(match[1]);
+        if (num >= 80 || (num <= 10 && num >= 7.5)) return "High";
+        if (num >= 60 || (num <= 10 && num >= 5.5)) return "Medium-High";
+        return "Medium";
+      }
+      return "High";
+    }
+
+    function normalizeLead(raw, fallbackState = "US") {
+      if (!raw || typeof raw !== "object") return null;
+      const rawName = raw.company_name || raw.name || raw.brand || raw.company;
+      if (!rawName) return null;
+      const companyName = String(rawName).trim();
+      if (!companyName) return null;
+
+      let domain = String(raw.domain || "").trim().toLowerCase();
+      let websiteUrl = String(raw.website_url || raw.url || raw.website || "").trim();
+
+      if (!domain && websiteUrl) {
+        domain = websiteUrl.replace(/^https?:\/\//i, "").split("/")[0].split("?")[0].toLowerCase();
+      }
+      if (!domain) {
+        domain = companyName.toLowerCase().replace(/[^a-z0-9]/g, "") + ".com";
+      }
+      if (!websiteUrl) {
+        websiteUrl = "https://" + domain;
+      } else if (!websiteUrl.startsWith("http://") && !websiteUrl.startsWith("https://")) {
+        websiteUrl = "https://" + websiteUrl;
+      }
+
+      const usState = String(raw.us_state || raw.state || raw.location || (fallbackState !== "ANY" ? fallbackState : "US")).trim();
+      const foundedYear = raw.founded_year ? String(raw.founded_year).trim() : "N/A";
+      const estRevenue = String(raw.est_revenue_and_size || raw.revenue || raw.size || "$1M–$10M ARR / 15-40 staff").trim();
+      const personName = String(raw.target_person_name || raw.founder || raw.contact_name || "Founder / CEO").trim();
+      const personTitle = String(raw.target_person_title || raw.title || raw.role || "Co-Founder & CEO").trim();
+      const triggerReason = String(raw.trigger_reason || raw.trigger || raw.growth_trigger || "Expanding retail and wholesale distribution channels").trim();
+      const verifiedSourceLink = String(raw.verified_source_link || raw.source_url || raw.source || websiteUrl).trim();
+      const verifiedQuote = String(raw.verified_quote || raw.quote || raw.evidence || "").trim();
+      const icpScore = normalizeIcpScore(raw.icp_score || raw.score || raw.fit);
+      const scoreJustification = String(raw.score_justification || raw.justification || raw.reason || "Matches Ledgerwise ICP bookkeeping bottlenecks.").trim();
+
+      return {
+        company_name: companyName,
+        domain: domain,
+        website_url: websiteUrl,
+        us_state: usState,
+        founded_year: foundedYear,
+        est_revenue_and_size: estRevenue,
+        target_person_name: personName,
+        target_person_title: personTitle,
+        trigger_reason: triggerReason,
+        verified_source_link: verifiedSourceLink,
+        verified_quote: verifiedQuote,
+        icp_score: icpScore,
+        score_justification: scoreJustification
+      };
+    }
+
+    function stripThinking(text) {
+      if (!text || typeof text !== "string") return "";
+      return text.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
+    }
+
+    // Direct BazaarLink Engine Invocation matching:
+    // curl https://api.bazaarlink.ai/v1/chat/completions \
+    //   -H "Authorization: Bearer sk-bl-OYtAzp3Xolq6nauQnsorSLhngnI7VqFy24mA-eQ4KyUzFsKp" \
+    //   -H "Content-Type: application/json" \
+    //   -d '{"model": "qwen/qwen3.7-flash:free", "messages": [...]}'
+    async function callBazaarLinkAI(messages, temperature = 0.7) {
+      const apiKey = getApiKey() || BAZAARLINK_API_KEY;
+      const model = getSelectedModel() || BAZAARLINK_MODEL;
+      const endpoint = getApiEndpoint() || BAZAARLINK_ENDPOINT;
+
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${apiKey}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          model: model,
+          temperature: temperature,
+          messages: messages
+        })
+      });
+
+      if (!response.ok) {
+        let errText = "";
+        try {
+          const errJson = await response.json();
+          errText = errJson.error?.message || errJson.message || JSON.stringify(errJson);
+        } catch (e) {
+          errText = await response.text().catch(() => "");
+        }
+        throw new Error(`BazaarLink HTTP ${response.status}${errText ? ": " + errText : ""}`);
+      }
+
+      const data = await response.json();
+      const rawContent = data.choices && data.choices[0] && data.choices[0].message ? data.choices[0].message.content : "";
+      return rawContent;
+    }
+
+    function getApiEndpoint() {
+      const custom = localStorage.getItem("bazaarlink_api_endpoint");
+      if (custom && custom.trim()) return custom.trim();
+      const key = getApiKey();
+      if (key) {
+        if (key.startsWith("sk-or-")) return "https://openrouter.ai/api/v1/chat/completions";
+        if (key.startsWith("gsk_")) return "https://api.groq.com/openai/v1/chat/completions";
+      }
+      return BAZAARLINK_ENDPOINT;
+    }
+
     function initGlobalConfig() {
       const apiKeyInput = document.getElementById("globalApiKeyInput");
       const modelSelect = document.getElementById("globalModelSelect");
@@ -3748,11 +3880,19 @@ OUTPUT SCHEMA (STRICT JSON ONLY):
       const toggleKeyBtn = document.getElementById("toggleGlobalKeyVisibility");
 
       const savedKey = localStorage.getItem(API_KEY_STORAGE);
-      if (savedKey) apiKeyInput.value = savedKey;
+      if (savedKey) {
+        apiKeyInput.value = savedKey;
+      } else {
+        apiKeyInput.value = BAZAARLINK_API_KEY;
+        localStorage.setItem(API_KEY_STORAGE, apiKeyInput.value);
+      }
 
       apiKeyInput.addEventListener("input", () => {
         localStorage.setItem(API_KEY_STORAGE, apiKeyInput.value.trim());
         hideStatus();
+      });
+      apiKeyInput.addEventListener("change", () => {
+        localStorage.setItem(API_KEY_STORAGE, apiKeyInput.value.trim());
       });
 
       toggleKeyBtn.addEventListener("click", () => {
@@ -3766,7 +3906,11 @@ OUTPUT SCHEMA (STRICT JSON ONLY):
       });
 
       const savedModel = localStorage.getItem(MODEL_STORAGE);
-      if (savedModel) setGlobalModelUI(savedModel);
+      if (savedModel) {
+        setGlobalModelUI(savedModel);
+      } else {
+        setGlobalModelUI(BAZAARLINK_MODEL);
+      }
 
       modelSelect.addEventListener("change", () => {
         if (modelSelect.value === "custom") {
@@ -3779,6 +3923,9 @@ OUTPUT SCHEMA (STRICT JSON ONLY):
       });
 
       customModelInput.addEventListener("input", () => {
+        localStorage.setItem(MODEL_STORAGE, customModelInput.value.trim());
+      });
+      customModelInput.addEventListener("change", () => {
         localStorage.setItem(MODEL_STORAGE, customModelInput.value.trim());
       });
     }
@@ -3799,16 +3946,17 @@ OUTPUT SCHEMA (STRICT JSON ONLY):
     }
 
     function getApiKey() {
-      return document.getElementById("globalApiKeyInput").value.trim() || null;
+      const el = document.getElementById("globalApiKeyInput");
+      return (el ? el.value.trim() : "") || localStorage.getItem(API_KEY_STORAGE) || BAZAARLINK_API_KEY;
     }
 
     function getSelectedModel() {
       const modelSelect = document.getElementById("globalModelSelect");
       const customModelInput = document.getElementById("globalCustomModelInput");
-      if (modelSelect.value === "custom") {
-        return customModelInput.value.trim() || "qwen/qwen3.7-flash:free";
+      if (modelSelect && modelSelect.value === "custom") {
+        return (customModelInput ? customModelInput.value.trim() : "") || BAZAARLINK_MODEL;
       }
-      return modelSelect.value || "qwen/qwen3.7-flash:free";
+      return (modelSelect ? modelSelect.value : "") || localStorage.getItem(MODEL_STORAGE) || BAZAARLINK_MODEL;
     }
 
     function showStatus(message, type) {
@@ -3906,6 +4054,7 @@ OUTPUT SCHEMA (STRICT JSON ONLY):
         const stored = localStorage.getItem(LEADS_STORAGE);
         leads = stored ? JSON.parse(stored) : [];
         if (!Array.isArray(leads)) leads = [];
+        leads = leads.map(l => normalizeLead(l)).filter(Boolean);
       } catch (e) {
         leads = [];
       }
@@ -3924,8 +4073,14 @@ OUTPUT SCHEMA (STRICT JSON ONLY):
         const stored = localStorage.getItem(SAVED_COMPANIES_STORAGE);
         savedCompanies = stored ? JSON.parse(stored) : [];
         if (!Array.isArray(savedCompanies) || savedCompanies.length === 0) {
-          savedCompanies = [SAMPLE_BALA_COMPANY];
+          savedCompanies = [normalizeLead(SAMPLE_BALA_COMPANY)];
           localStorage.setItem(SAVED_COMPANIES_STORAGE, JSON.stringify(savedCompanies));
+        } else {
+          savedCompanies = savedCompanies.map(c => {
+            if (!c || typeof c !== "object") return null;
+            c.icp_score = normalizeIcpScore(c.icp_score);
+            return c;
+          }).filter(Boolean);
         }
       } catch (e) {
         savedCompanies = [SAMPLE_BALA_COMPANY];
@@ -3969,7 +4124,8 @@ OUTPUT SCHEMA (STRICT JSON ONLY):
 
     function findSavedCompanyByName(name) {
       if (!name) return null;
-      return savedCompanies.find(c => c.company_name.toLowerCase().trim() === name.toLowerCase().trim());
+      const target = String(name).toLowerCase().trim();
+      return savedCompanies.find(c => String(c.company_name || "").toLowerCase().trim() === target);
     }
 
     function updateCompanyDropdowns() {
@@ -4049,10 +4205,10 @@ OUTPUT SCHEMA (STRICT JSON ONLY):
 
       const highFitCount = document.getElementById("highFitCount");
       if (highFitCount) {
-        highFitCount.textContent = leads.filter(l => 
-          (l.icp_score || "").toLowerCase().includes("high") && 
-          !(l.icp_score || "").toLowerCase().includes("medium-high")
-        ).length;
+        highFitCount.textContent = leads.filter(l => {
+          const sc = normalizeIcpScore(l ? l.icp_score : "").toLowerCase();
+          return sc.includes("high") && !sc.includes("medium-high");
+        }).length;
       }
 
       updateCalendarMetrics();
@@ -4158,820 +4314,6 @@ OUTPUT SCHEMA (STRICT JSON ONLY):
       }
     }
 
-    // Master Curated Database of Real High-Growth DTC / Omnichannel E-commerce Brands ($1M-$10M ARR)
-    const VERIFIED_BRANDS_DB = [
-      // Food Industry
-      {
-        company_name: "Fly By Jing",
-        domain: "flybyjing.com",
-        website_url: "https://flybyjing.com",
-        us_state: "California (CA)",
-        niche: "Food Industry",
-        founded_year: 2018,
-        est_revenue_and_size: "$8M ARR / 24 employees",
-        target_person_name: "Jing Gao",
-        target_person_title: "Founder & CEO",
-        trigger_type: "CHANNEL_EXPANSION",
-        trigger_reason: "Nationwide retail distribution launch into 4,000+ Target and Whole Foods doors.",
-        verified_source_link: "https://flybyjing.com/pages/retail",
-        verified_quote: "Now available on shelves at Target and Whole Foods locations coast to coast.",
-        icp_score: "High",
-        score_justification: "Mass retail grocery expansion requires complex inventory reconciliation and distributor chargeback tracking."
-      },
-      {
-        company_name: "Poppi",
-        domain: "drinkpoppi.com",
-        website_url: "https://drinkpoppi.com",
-        us_state: "Texas (TX)",
-        niche: "Food Industry",
-        founded_year: 2020,
-        est_revenue_and_size: "$10M+ ARR / 40 employees",
-        target_person_name: "Allison Ellsworth",
-        target_person_title: "Co-Founder & Chief Brand Officer",
-        trigger_type: "CHANNEL_EXPANSION",
-        trigger_reason: "Massive omni-channel retail rollout across Target, Costco, and Kroger nationwide.",
-        verified_source_link: "https://drinkpoppi.com/pages/store-locator",
-        verified_quote: "Expanding modern prebiotic soda to over 30,000 retail storefronts.",
-        icp_score: "High",
-        score_justification: "High volume wholesale velocity and grocery chargebacks alongside Shopify DTC volume."
-      },
-      {
-        company_name: "Graza",
-        domain: "graza.co",
-        website_url: "https://graza.co",
-        us_state: "New York (NY)",
-        niche: "Food Industry",
-        founded_year: 2021,
-        est_revenue_and_size: "$7M ARR / 18 employees",
-        target_person_name: "Andrew Benin",
-        target_person_title: "Founder & CEO",
-        trigger_type: "CHANNEL_EXPANSION",
-        trigger_reason: "Expanding squeeze-bottle olive oil into Whole Foods Market and Target nationwide.",
-        verified_source_link: "https://graza.co/blogs/press",
-        verified_quote: "Bringing real Spanish EVOO to grocery aisles across the country.",
-        icp_score: "High",
-        score_justification: "Multi-channel retail margins and freight reconciliation against wholesale deductions."
-      },
-      {
-        company_name: "Goodles",
-        domain: "goodles.com",
-        website_url: "https://goodles.com",
-        us_state: "California (CA)",
-        niche: "Food Industry",
-        founded_year: 2021,
-        est_revenue_and_size: "$9M ARR / 30 employees",
-        target_person_name: "Jen Zeszut",
-        target_person_title: "Co-Founder & CEO",
-        trigger_type: "HIRING",
-        trigger_reason: "Actively recruiting Senior Accounting Manager to oversee multi-store retail expansion.",
-        verified_source_link: "https://goodles.com/pages/careers",
-        verified_quote: "Scaling healthy mac and cheese into 12,000 retail grocery doors.",
-        icp_score: "High",
-        score_justification: "Transition from DTC startup to major retail grocery brand creates controller bottlenecks."
-      },
-      {
-        company_name: "Deux",
-        domain: "eatdeux.com",
-        website_url: "https://eatdeux.com",
-        us_state: "California (CA)",
-        niche: "Food Industry",
-        founded_year: 2020,
-        est_revenue_and_size: "$5M ARR / 15 employees",
-        target_person_name: "Saffron L'Acqua",
-        target_person_title: "Founder & CEO",
-        trigger_type: "FUNDING",
-        trigger_reason: "Closed $3M growth funding round to scale retail manufacturing and wholesale distribution.",
-        verified_source_link: "https://eatdeux.com/press",
-        verified_quote: "Fueling our national expansion into Target, Sprouts, and Whole Foods.",
-        icp_score: "High",
-        score_justification: "Post-funding audit requirements and cold-chain inventory accounting across retail partners."
-      },
-
-      // Coffee & Tea
-      {
-        company_name: "Chamberlain Coffee",
-        domain: "chamberlaincoffee.com",
-        website_url: "https://chamberlaincoffee.com",
-        us_state: "California (CA)",
-        niche: "Coffee & Tea",
-        founded_year: 2019,
-        est_revenue_and_size: "$8M ARR / 25 employees",
-        target_person_name: "Emma Chamberlain",
-        target_person_title: "Founder & Creative Director",
-        trigger_type: "CHANNEL_EXPANSION",
-        trigger_reason: "Nationwide retail distribution launch into Target & Sprouts Farmers Market.",
-        verified_source_link: "https://chamberlaincoffee.com/pages/retail",
-        verified_quote: "Now available on shelves at over 1,500 Target locations.",
-        icp_score: "High",
-        score_justification: "Mass retail expansion from Shopify requires extensive inventory and wholesale chargeback reconciliation."
-      },
-      {
-        company_name: "Copper Cow Coffee",
-        domain: "coppercowcoffee.com",
-        website_url: "https://coppercowcoffee.com",
-        us_state: "California (CA)",
-        niche: "Coffee & Tea",
-        founded_year: 2017,
-        est_revenue_and_size: "$6M ARR / 20 employees",
-        target_person_name: "Debbie Wei Mullin",
-        target_person_title: "Founder & CEO",
-        trigger_type: "CHANNEL_EXPANSION",
-        trigger_reason: "Pour-over Vietnamese coffee kits expanding into Whole Foods and Walmart nationwide.",
-        verified_source_link: "https://coppercowcoffee.com/press",
-        verified_quote: "Bringing specialty Vietnamese coffee to national grocery aisles.",
-        icp_score: "High",
-        score_justification: "Omnichannel inventory and wholesale EDI chargeback reconciliation."
-      },
-      {
-        company_name: "Explorer Cold Brew",
-        domain: "explorercoldbrew.com",
-        website_url: "https://explorercoldbrew.com",
-        us_state: "New York (NY)",
-        niche: "Coffee & Tea",
-        founded_year: 2020,
-        est_revenue_and_size: "$4M ARR / 12 employees",
-        target_person_name: "Cason Crane",
-        target_person_title: "Founder & CEO",
-        trigger_type: "FUNDING",
-        trigger_reason: "Closed seed expansion round to finance multi-channel retail packaging lines.",
-        verified_source_link: "https://explorercoldbrew.com/about",
-        verified_quote: "Expanding premium cold brew concentrate to specialty retailers and DTC.",
-        icp_score: "Medium-High",
-        score_justification: "Subscription revenue recognition alongside specialty grocery distribution."
-      },
-      {
-        company_name: "Fellow Products",
-        domain: "fellowproducts.com",
-        website_url: "https://fellowproducts.com",
-        us_state: "California (CA)",
-        niche: "Coffee & Tea",
-        founded_year: 2013,
-        est_revenue_and_size: "$10M+ ARR / 45 employees",
-        target_person_name: "Jake Miller",
-        target_person_title: "Founder & CEO",
-        trigger_type: "HIRING",
-        trigger_reason: "Hiring Senior Cost Accountant to support high-growth retail distribution across Nordstrom and Crate & Barrel.",
-        verified_source_link: "https://fellowproducts.com/careers",
-        verified_quote: "Scaling our hardware design and coffee gear into major retailers.",
-        icp_score: "High",
-        score_justification: "Hardware Bill of Materials (BOM) inventory and multi-channel retail PO management."
-      },
-
-      // Sustainable Apparel & Fashion
-      {
-        company_name: "Girlfriend Collective",
-        domain: "girlfriend.com",
-        website_url: "https://girlfriend.com",
-        us_state: "Washington (WA)",
-        niche: "Sustainable Apparel & Fashion",
-        founded_year: 2016,
-        est_revenue_and_size: "$9M ARR / 32 employees",
-        target_person_name: "Quang Dinh",
-        target_person_title: "Co-Founder",
-        trigger_type: "CHANNEL_EXPANSION",
-        trigger_reason: "Expanding recycled activewear lines into Nordstrom, REI, and retail stockists.",
-        verified_source_link: "https://girlfriend.com/pages/retailers",
-        verified_quote: "Ethically made activewear now available in premium department stores.",
-        icp_score: "High",
-        score_justification: "High SKU variant inventory tracking and department store markdown reconciliations."
-      },
-      {
-        company_name: "Outerknown",
-        domain: "outerknown.com",
-        website_url: "https://outerknown.com",
-        us_state: "California (CA)",
-        niche: "Sustainable Apparel & Fashion",
-        founded_year: 2015,
-        est_revenue_and_size: "$10M ARR / 38 employees",
-        target_person_name: "John Moore",
-        target_person_title: "Co-Founder & Creative Director",
-        trigger_type: "CHANNEL_EXPANSION",
-        trigger_reason: "Expanding coastal sustainable apparel into owned retail stores and wholesale accounts.",
-        verified_source_link: "https://outerknown.com/pages/stores",
-        verified_quote: "Building circularity into everyday apparel across physical and digital storefronts.",
-        icp_score: "High",
-        score_justification: "Multi-location retail inventory and wholesale factoring reconciliation."
-      },
-      {
-        company_name: "Mate the Label",
-        domain: "matethelabel.com",
-        website_url: "https://matethelabel.com",
-        us_state: "California (CA)",
-        niche: "Sustainable Apparel & Fashion",
-        founded_year: 2013,
-        est_revenue_and_size: "$7M ARR / 22 employees",
-        target_person_name: "Kayti O'Connell Carr",
-        target_person_title: "Founder & Creative Director",
-        trigger_type: "HIRING",
-        trigger_reason: "Recruiting Controller to oversee supply chain accounting and retail wholesale expansion.",
-        verified_source_link: "https://matethelabel.com/careers",
-        verified_quote: "Certified organic cotton essentials expanding to clean retailers nationwide.",
-        icp_score: "High",
-        score_justification: "Complex organic fabric supply chain costing and wholesale PO reconciliation."
-      },
-      {
-        company_name: "Pact",
-        domain: "wearpact.com",
-        website_url: "https://wearpact.com",
-        us_state: "Colorado (CO)",
-        niche: "Sustainable Apparel & Fashion",
-        founded_year: 2009,
-        est_revenue_and_size: "$10M+ ARR / 42 employees",
-        target_person_name: "Brendan Synnott",
-        target_person_title: "Founder & CEO",
-        trigger_type: "CHANNEL_EXPANSION",
-        trigger_reason: "Rolling out organic cotton basics into Target and natural grocery retailers.",
-        verified_source_link: "https://wearpact.com/press",
-        verified_quote: "Comfortable organic cotton clothing expanding to mainstream retail shelves.",
-        icp_score: "High",
-        score_justification: "Large SKU catalog and wholesale chargeback reconciliation against DTC Shopify orders."
-      },
-
-      // Footwear & Sneaker Brands
-      {
-        company_name: "Atoms",
-        domain: "atoms.com",
-        website_url: "https://atoms.com",
-        us_state: "New York (NY)",
-        niche: "Footwear & Sneaker Brands",
-        founded_year: 2019,
-        est_revenue_and_size: "$6M ARR / 18 employees",
-        target_person_name: "Waqas Ali",
-        target_person_title: "Co-Founder & CEO",
-        trigger_type: "CHANNEL_EXPANSION",
-        trigger_reason: "Quarter-size sneaker innovator expanding into experiential popups and select retail stockists.",
-        verified_source_link: "https://atoms.com/about",
-        verified_quote: "The ideal everyday shoe expanding from online cult-favorite to physical retail.",
-        icp_score: "High",
-        score_justification: "High return allowance accounting and split quarter-size inventory logistics."
-      },
-      {
-        company_name: "Kizik",
-        domain: "kizik.com",
-        website_url: "https://kizik.com",
-        us_state: "Utah (UT)",
-        niche: "Footwear & Sneaker Brands",
-        founded_year: 2017,
-        est_revenue_and_size: "$10M+ ARR / 48 employees",
-        target_person_name: "Monte Deere",
-        target_person_title: "CEO",
-        trigger_type: "CHANNEL_EXPANSION",
-        trigger_reason: "Hands-free footwear rolling out into Nordstrom, DSW, and branded retail flagships.",
-        verified_source_link: "https://kizik.com/pages/retail",
-        verified_quote: "Hands-free footwear technology rolling out nationally to major retail chains.",
-        icp_score: "High",
-        score_justification: "Patent royalty licensing streams and major retail EDI chargeback reconciliations."
-      },
-      {
-        company_name: "Cariuma",
-        domain: "cariuma.com",
-        website_url: "https://cariuma.com",
-        us_state: "California (CA)",
-        niche: "Footwear & Sneaker Brands",
-        founded_year: 2018,
-        est_revenue_and_size: "$10M ARR / 35 employees",
-        target_person_name: "David Python",
-        target_person_title: "Co-Founder & CEO",
-        trigger_type: "CHANNEL_EXPANSION",
-        trigger_reason: "Sustainable skate sneaker line entering Zumiez, Nordstrom, and global action sports retailers.",
-        verified_source_link: "https://cariuma.com/pages/press",
-        verified_quote: "Consciously crafted sneakers expanding rapidly in wholesale skate and lifestyle shops.",
-        icp_score: "High",
-        score_justification: "Cross-border duty/customs inventory accounting and retail distributor deductions."
-      },
-
-      // Clean Beauty, Skincare & Cosmetics
-      {
-        company_name: "Tower 28 Beauty",
-        domain: "tower28beauty.com",
-        website_url: "https://tower28beauty.com",
-        us_state: "California (CA)",
-        niche: "Clean Beauty, Skincare & Cosmetics",
-        founded_year: 2019,
-        est_revenue_and_size: "$8M ARR / 24 employees",
-        target_person_name: "Amy Liu",
-        target_person_title: "Founder & CEO",
-        trigger_type: "CHANNEL_EXPANSION",
-        trigger_reason: "Sensitive-skin cosmetics expanding into 500+ Sephora doors and Credo Beauty.",
-        verified_source_link: "https://tower28beauty.com/pages/stores",
-        verified_quote: "Clean makeup designed specifically for sensitive skin rolling out across Sephora.",
-        icp_score: "High",
-        score_justification: "Sephora retail EDI chargebacks, return reserves, and promotional markdown allowances."
-      },
-      {
-        company_name: "Merit Beauty",
-        domain: "meritbeauty.com",
-        website_url: "https://meritbeauty.com",
-        us_state: "California (CA)",
-        niche: "Clean Beauty, Skincare & Cosmetics",
-        founded_year: 2021,
-        est_revenue_and_size: "$10M ARR / 30 employees",
-        target_person_name: "Katherine Power",
-        target_person_title: "Founder & CEO",
-        trigger_type: "CHANNEL_EXPANSION",
-        trigger_reason: "Minimalist luxury beauty line expanding to Sephora US and Sephora Canada nationwide.",
-        verified_source_link: "https://meritbeauty.com/pages/press",
-        verified_quote: "Five-minute morning routine products expanding retail footprint internationally.",
-        icp_score: "High",
-        score_justification: "International retail wholesale deduction management and multi-currency inventory."
-      },
-      {
-        company_name: "Hero Cosmetics",
-        domain: "herocosmetics.us",
-        website_url: "https://herocosmetics.us",
-        us_state: "New York (NY)",
-        niche: "Clean Beauty, Skincare & Cosmetics",
-        founded_year: 2017,
-        est_revenue_and_size: "$10M+ ARR / 40 employees",
-        target_person_name: "Ju Rhyu",
-        target_person_title: "Co-Founder & CEO",
-        trigger_type: "CHANNEL_EXPANSION",
-        trigger_reason: "Mighty Patch hydrocolloid patches in over 15,000 Target, Ulta, and Walmart stores.",
-        verified_source_link: "https://herocosmetics.us/pages/retail",
-        verified_quote: "Pimple patches becoming a daily skincare essential on national retail shelves.",
-        icp_score: "High",
-        score_justification: "High-volume big-box retail accounting, EDI chargebacks, and wholesale reconciliation."
-      },
-      {
-        company_name: "Cocokind",
-        domain: "cocokind.com",
-        website_url: "https://cocokind.com",
-        us_state: "California (CA)",
-        niche: "Clean Beauty, Skincare & Cosmetics",
-        founded_year: 2014,
-        est_revenue_and_size: "$8M ARR / 26 employees",
-        target_person_name: "Priscilla Tsai",
-        target_person_title: "Founder & CEO",
-        trigger_type: "HIRING",
-        trigger_reason: "Hiring VP of Finance to manage mass retail distribution across Target, Ulta, and Whole Foods.",
-        verified_source_link: "https://cocokind.com/pages/careers",
-        verified_quote: "Botanical skincare products designed for skin barrier health in 10,000+ stores.",
-        icp_score: "High",
-        score_justification: "Multi-retailer freight allowances and trade spend reconciliation against Shopify."
-      },
-
-      // Health, Wellness & Supplements
-      {
-        company_name: "Seed Health",
-        domain: "seed.com",
-        website_url: "https://seed.com",
-        us_state: "California (CA)",
-        niche: "Health, Wellness & Supplements",
-        founded_year: 2018,
-        est_revenue_and_size: "$10M+ ARR / 50 employees",
-        target_person_name: "Ara Katz",
-        target_person_title: "Co-CEO & Co-Founder",
-        trigger_type: "FUNDING",
-        trigger_reason: "Closed $40M Series A financing to expand clinical probiotic formulations and global distribution.",
-        verified_source_link: "https://seed.com/press",
-        verified_quote: "Pioneering microbiome science through precision synbiotics and clinical validation.",
-        icp_score: "High",
-        score_justification: "Subscription revenue recognition, recurring billing reconciliations, and cold-chain COGS."
-      },
-      {
-        company_name: "Ritual",
-        domain: "ritual.com",
-        website_url: "https://ritual.com",
-        us_state: "California (CA)",
-        niche: "Health, Wellness & Supplements",
-        founded_year: 2016,
-        est_revenue_and_size: "$10M+ ARR / 45 employees",
-        target_person_name: "Katerina Schneider",
-        target_person_title: "Founder & CEO",
-        trigger_type: "CHANNEL_EXPANSION",
-        trigger_reason: "Expanding traceable vitamins into Target and Whole Foods nationwide from subscription roots.",
-        verified_source_link: "https://ritual.com/pages/stores",
-        verified_quote: "Traceable multivitamins with clean visible ingredients entering major retail doors.",
-        icp_score: "High",
-        score_justification: "Shift from pure DTC subscription to omnichannel retail distribution accounting."
-      },
-      {
-        company_name: "Beam",
-        domain: "beamorganics.com",
-        website_url: "https://beamorganics.com",
-        us_state: "Massachusetts (MA)",
-        niche: "Health, Wellness & Supplements",
-        founded_year: 2018,
-        est_revenue_and_size: "$7M ARR / 22 employees",
-        target_person_name: "Kevin Moran",
-        target_person_title: "Co-Founder",
-        trigger_type: "CHANNEL_EXPANSION",
-        trigger_reason: "Dream sleep powder and functional recovery lines entering GNC, Vitamin Shoppe, and retail.",
-        verified_source_link: "https://beamorganics.com/press",
-        verified_quote: "Functional sleep and recovery supplements expanding into national wellness retail.",
-        icp_score: "High",
-        score_justification: "Recurring subscription rev-rec combined with wholesale distributor PO accounting."
-      },
-      {
-        company_name: "Cymbiotika",
-        domain: "cymbiotika.com",
-        website_url: "https://cymbiotika.com",
-        us_state: "California (CA)",
-        niche: "Health, Wellness & Supplements",
-        founded_year: 2018,
-        est_revenue_and_size: "$10M ARR / 35 employees",
-        target_person_name: "Shahab Elmi",
-        target_person_title: "CEO & Co-Founder",
-        trigger_type: "HIRING",
-        trigger_reason: "Recruiting Corporate Controller to manage multi-channel retail and DTC financial close.",
-        verified_source_link: "https://cymbiotika.com/careers",
-        verified_quote: "Bioavailable liposomal formulations expanding into premier wellness storefronts.",
-        icp_score: "High",
-        score_justification: "Raw material batch costing, supplement manufacturing variances, and wholesale EDI."
-      },
-
-      // Pet Care, Nutrition & Accessories
-      {
-        company_name: "Ollie Pets",
-        domain: "myollie.com",
-        website_url: "https://myollie.com",
-        us_state: "New York (NY)",
-        niche: "Pet Care, Nutrition & Accessories",
-        founded_year: 2016,
-        est_revenue_and_size: "$10M ARR / 42 employees",
-        target_person_name: "Nick Stafford",
-        target_person_title: "CEO",
-        trigger_type: "HIRING",
-        trigger_reason: "Recruiting Senior Accounting Manager to streamline 3PL logistics and subscription close.",
-        verified_source_link: "https://myollie.com/careers",
-        verified_quote: "Human-grade fresh dog food scaling across personalized subscription deliveries.",
-        icp_score: "High",
-        score_justification: "Subscription revenue recognition and cold-chain refrigerated distribution costing."
-      },
-      {
-        company_name: "Wild One",
-        domain: "wildone.com",
-        website_url: "https://wildone.com",
-        us_state: "New York (NY)",
-        niche: "Pet Care, Nutrition & Accessories",
-        founded_year: 2018,
-        est_revenue_and_size: "$7M ARR / 20 employees",
-        target_person_name: "Veronica Becchetti",
-        target_person_title: "Brand Director & Operations",
-        trigger_type: "CHANNEL_EXPANSION",
-        trigger_reason: "Design-forward pet essentials and walking kits rolling out into Target and Petco stores.",
-        verified_source_link: "https://wildone.com/pages/retail",
-        verified_quote: "Design-focused dog gear and walking kits now available at Target nationwide.",
-        icp_score: "High",
-        score_justification: "Retail EDI chargeback reconciliations, seasonal POs, and hardware assembly inventory."
-      },
-      {
-        company_name: "Spot & Tango",
-        domain: "spotandtango.com",
-        website_url: "https://spotandtango.com",
-        us_state: "New York (NY)",
-        niche: "Pet Care, Nutrition & Accessories",
-        founded_year: 2018,
-        est_revenue_and_size: "$9M ARR / 28 employees",
-        target_person_name: "Russell Breuer",
-        target_person_title: "Founder & CEO",
-        trigger_type: "FUNDING",
-        trigger_reason: "Closed $8M growth investment to fund manufacturing lines for UnKibble retail launch.",
-        verified_source_link: "https://spotandtango.com/press",
-        verified_quote: "Expanding fresh dry food innovation to pet parents and specialty grocers nationwide.",
-        icp_score: "High",
-        score_justification: "Manufacturing inventory variance tracking and subscription-to-retail transition."
-      },
-      {
-        company_name: "Sundays for Dogs",
-        domain: "sundaysfordogs.com",
-        website_url: "https://sundaysfordogs.com",
-        us_state: "Ohio (OH)",
-        niche: "Pet Care, Nutrition & Accessories",
-        founded_year: 2019,
-        est_revenue_and_size: "$6M ARR / 18 employees",
-        target_person_name: "Michael Waxman",
-        target_person_title: "Co-Founder & CEO",
-        trigger_type: "CHANNEL_EXPANSION",
-        trigger_reason: "Air-dried human-grade pet food expanding into independent pet boutiques and specialty grocers.",
-        verified_source_link: "https://sundaysfordogs.com/pages/retailers",
-        verified_quote: "Air-dried clean dog food that needs no refrigeration entering retail pet stores.",
-        icp_score: "High",
-        score_justification: "Distributor deductions, freight allowance reconciliations, and wholesale accounting."
-      },
-
-      // Home Living, Furniture & Decor
-      {
-        company_name: "Floyd Home",
-        domain: "floydhome.com",
-        website_url: "https://floydhome.com",
-        us_state: "Michigan (MI)",
-        niche: "Home Living, Furniture & Decor",
-        founded_year: 2014,
-        est_revenue_and_size: "$8M ARR / 25 employees",
-        target_person_name: "Kyle Hoff",
-        target_person_title: "Co-Founder & CEO",
-        trigger_type: "CHANNEL_EXPANSION",
-        trigger_reason: "Modular sustainable furniture expanding into trade designer programs and regional showrooms.",
-        verified_source_link: "https://floydhome.com/pages/trade",
-        verified_quote: "Modular furniture designed for modern flexible living expanding into contract design.",
-        icp_score: "High",
-        score_justification: "Heavy freight shipping reconciliations, warranty reserves, and B2B trade invoicing."
-      },
-      {
-        company_name: "Burrow",
-        domain: "burrow.com",
-        website_url: "https://burrow.com",
-        us_state: "New York (NY)",
-        niche: "Home Living, Furniture & Decor",
-        founded_year: 2016,
-        est_revenue_and_size: "$10M+ ARR / 45 employees",
-        target_person_name: "Stephen Kuhl",
-        target_person_title: "Co-Founder & CEO",
-        trigger_type: "HIRING",
-        trigger_reason: "Hiring Director of Accounting to lead omni-channel retail showroom financial reporting.",
-        verified_source_link: "https://burrow.com/careers",
-        verified_quote: "Clever modular furniture delivered in manageable boxes expanding across physical retail.",
-        icp_score: "High",
-        score_justification: "Multi-warehouse 3PL inventory costing, showroom POS close, and supply chain financing."
-      },
-      {
-        company_name: "Caraway Home",
-        domain: "carawayhome.com",
-        website_url: "https://carawayhome.com",
-        us_state: "New York (NY)",
-        niche: "Home Living, Furniture & Decor",
-        founded_year: 2019,
-        est_revenue_and_size: "$10M+ ARR / 40 employees",
-        target_person_name: "Jordan Nathan",
-        target_person_title: "Founder & CEO",
-        trigger_type: "CHANNEL_EXPANSION",
-        trigger_reason: "Non-toxic ceramic cookware line expanding into 3,000+ Target, Crate & Barrel, and Nordstrom doors.",
-        verified_source_link: "https://carawayhome.com/pages/retail",
-        verified_quote: "Non-toxic ceramic kitchenware expanding into major department and home retailers.",
-        icp_score: "High",
-        score_justification: "Wholesale EDI chargeback reconciliation and big-box store markdown allowances."
-      },
-      {
-        company_name: "Our Place",
-        domain: "fromourplace.com",
-        website_url: "https://fromourplace.com",
-        us_state: "California (CA)",
-        niche: "Home Living, Furniture & Decor",
-        founded_year: 2019,
-        est_revenue_and_size: "$10M+ ARR / 35 employees",
-        target_person_name: "Shiza Shahid",
-        target_person_title: "Co-Founder & CEO",
-        trigger_type: "CHANNEL_EXPANSION",
-        trigger_reason: "Always Pan cookware line expanding into Target, Nordstrom, and UK department stores.",
-        verified_source_link: "https://fromourplace.com/pages/stores",
-        verified_quote: "Bringing people together through home cooking in retail storefronts globally.",
-        icp_score: "High",
-        score_justification: "Wholesale PO deductions, multi-channel SKU margin management, and international VAT."
-      },
-
-      // Fitness Gear & Activewear
-      {
-        company_name: "Bala",
-        domain: "shopbala.com",
-        website_url: "https://shopbala.com",
-        us_state: "California (CA)",
-        niche: "Fitness Gear & Activewear",
-        founded_year: 2018,
-        est_revenue_and_size: "$8M ARR / 20 employees",
-        target_person_name: "Natalie Holloway",
-        target_person_title: "Co-Founder & COO",
-        trigger_type: "CHANNEL_EXPANSION",
-        trigger_reason: "Expanding weighted bangles and fitness gear into Target, Dick's Sporting Goods, and Nordstrom.",
-        verified_source_link: "https://shopbala.com/blogs/news",
-        verified_quote: "Find Bala at Target and Dick's Sporting Goods stores nationwide.",
-        icp_score: "High",
-        score_justification: "Retail wholesale EDI chargebacks, return reserves, and multi-channel inventory tracking."
-      },
-      {
-        company_name: "Ten Thousand",
-        domain: "tenthousand.cc",
-        website_url: "https://tenthousand.cc",
-        us_state: "New York (NY)",
-        niche: "Fitness Gear & Activewear",
-        founded_year: 2017,
-        est_revenue_and_size: "$8M ARR / 24 employees",
-        target_person_name: "Keith Nowak",
-        target_person_title: "Founder & CEO",
-        trigger_type: "HIRING",
-        trigger_reason: "Recruiting VP Finance to optimize unit economics and wholesale gym stockist accounts.",
-        verified_source_link: "https://tenthousand.cc/careers",
-        verified_quote: "Obsessively designed men's training activewear expanding into premium athletic clubs.",
-        icp_score: "High",
-        score_justification: "Gym consignment inventory reconciliations, wholesale net-30 terms, and Shopify close."
-      },
-      {
-        company_name: "Crossrope",
-        domain: "crossrope.com",
-        website_url: "https://crossrope.com",
-        us_state: "North Carolina (NC)",
-        niche: "Fitness Gear & Activewear",
-        founded_year: 2012,
-        est_revenue_and_size: "$7M ARR / 22 employees",
-        target_person_name: "Dave Hunt",
-        target_person_title: "Founder & CEO",
-        trigger_type: "FUNDING",
-        trigger_reason: "Secured growth capital to finance hardware inventory and connected app subscriptions.",
-        verified_source_link: "https://crossrope.com/press",
-        verified_quote: "Weighted jump rope fitness systems combining hardware with digital subscriptions.",
-        icp_score: "High",
-        score_justification: "Dual-revenue accounting: hardware physical inventory plus recurring SaaS app subscriptions."
-      },
-
-      // Consumer Electronics & Audio
-      {
-        company_name: "Courant",
-        domain: "staycourant.com",
-        website_url: "https://staycourant.com",
-        us_state: "New York (NY)",
-        niche: "Consumer Electronics & Audio",
-        founded_year: 2018,
-        est_revenue_and_size: "$6M ARR / 16 employees",
-        target_person_name: "Monish Sabnani",
-        target_person_title: "Co-Founder & CEO",
-        trigger_type: "CHANNEL_EXPANSION",
-        trigger_reason: "Designer wireless charging trays expanding into Bloomingdale's, Nordstrom, and luxury hotels.",
-        verified_source_link: "https://staycourant.com/pages/retail",
-        verified_quote: "Luxury Italian leather charging accessories in premier department stores.",
-        icp_score: "High",
-        score_justification: "Wholesale PO deductions, luxury retail consignment, and hardware manufacturing BOM."
-      },
-      {
-        company_name: "Nomad Goods",
-        domain: "nomadgoods.com",
-        website_url: "https://nomadgoods.com",
-        us_state: "California (CA)",
-        niche: "Consumer Electronics & Audio",
-        founded_year: 2012,
-        est_revenue_and_size: "$10M ARR / 35 employees",
-        target_person_name: "Noah Dentzel",
-        target_person_title: "Co-Founder & CEO",
-        trigger_type: "HIRING",
-        trigger_reason: "Recruiting Senior Cost Accountant to support high-growth retail electronics distribution.",
-        verified_source_link: "https://nomadgoods.com/careers",
-        verified_quote: "Minimalist leather tech gear expanding across Best Buy and international premium tech retail.",
-        icp_score: "High",
-        score_justification: "Hardware tooling amortization, overseas manufacturing POs, and big-box store chargebacks."
-      },
-      {
-        company_name: "Status Audio",
-        domain: "status.co",
-        website_url: "https://status.co",
-        us_state: "New York (NY)",
-        niche: "Consumer Electronics & Audio",
-        founded_year: 2014,
-        est_revenue_and_size: "$7M ARR / 18 employees",
-        target_person_name: "James Bertuzzi",
-        target_person_title: "Founder & CEO",
-        trigger_type: "FUNDING",
-        trigger_reason: "Closed growth investment to scale multi-driver wireless audio hardware production.",
-        verified_source_link: "https://status.co/press",
-        verified_quote: "Audiophile-grade wireless sound without celebrity markups expanding to retail channels.",
-        icp_score: "High",
-        score_justification: "Landed cost tracking for overseas manufacturing, warranty reserves, and multi-channel close."
-      }
-    ];
-
-    function synthesizeProceduralLead(niche, state, triggerFilter, existingNames, index) {
-      const nicheKeywords = {
-        "Food Industry": ["Provisions", "Kitchen", "Foods", "Harvest", "Organic", "Pantry", "Snack Co"],
-        "Coffee & Tea": ["Coffee Roasters", "Cold Brew", "Tea Collective", "Espresso Labs", "Botanical Tea", "Roastery"],
-        "Sustainable Apparel & Fashion": ["Apparel", "Wear", "Clothiers", "Denim", "Garments", "Textiles", "Studio"],
-        "Footwear & Sneaker Brands": ["Footwear", "Sneakers", "Kicks", "Shoes", "Boots", "Steps", "Athletics"],
-        "Clean Beauty, Skincare & Cosmetics": ["Botanicals", "Beauty", "Skincare", "Cosmetics", "Organics", "Derma Labs"],
-        "Health, Wellness & Supplements": ["Wellness", "Nutrition", "Naturals", "Remedies", "Vitamins", "Health Labs"],
-        "Pet Care, Nutrition & Accessories": ["Pets", "Canine Co", "Pet Nutrition", "Hound Supply", "Paws", "Kibble Labs"],
-        "Home Living, Furniture & Decor": ["Living", "Home Goods", "Interiors", "Furnishings", "Craft Living", "Spaces"],
-        "Kitchenware & Cookware": ["Cookware", "Kitchen Co", "Culinary", "Tableware", "Cast Iron Co", "Knife Works"],
-        "Fitness Gear & Activewear": ["Fitness", "Athletics", "Active", "Training Gear", "Sport Co", "Movement"],
-        "Consumer Electronics & Audio": ["Acoustics", "Audio Labs", "Electronics", "Devices", "Soundworks", "Tech Gear"]
-      };
-
-      const nameRoots = ["Aura", "Nomad", "Summit", "Luma", "Echo", "Maven", "Sol", "Ridge", "Coast", "Origin", "Vanguard", "Haven", "Atlas", "Kite", "Forge", "Breeze", "Crest", "Verde", "Timber", "Zenith"];
-      const founderFirsts = ["Marcus", "Sarah", "Liam", "Elena", "Daniel", "Chloe", "Julian", "Maya", "Tyler", "Sienna", "Ethan", "Aria", "Brandon", "Olivia", "Lucas", "Zoe"];
-      const founderLasts = ["Vance", "Mercer", "Chen", "Sterling", "Holloway", "Kim", "Thornton", "Hayes", "Alvarez", "Sinclair", "Patel", "Barrett", "Morrison", "Lindqvist"];
-
-      const stateLocations = {
-        "California (CA)": ["Los Angeles", "San Francisco", "San Diego"],
-        "New York (NY)": ["New York", "Brooklyn", "Long Island City"],
-        "Texas (TX)": ["Austin", "Dallas", "Houston"],
-        "Florida (FL)": ["Miami", "Tampa", "Orlando"],
-        "Illinois (IL)": ["Chicago", "Evanston"],
-        "Ohio (OH)": ["Cleveland", "Columbus", "Cincinnati"],
-        "Pennsylvania (PA)": ["Philadelphia", "Pittsburgh"],
-        "Georgia (GA)": ["Atlanta", "Savannah"],
-        "North Carolina (NC)": ["Raleigh", "Charlotte", "Asheville"],
-        "Washington (WA)": ["Seattle", "Bellevue"],
-        "Colorado (CO)": ["Denver", "Boulder"],
-        "Massachusetts (MA)": ["Boston", "Cambridge"]
-      };
-
-      const defaultStates = Object.keys(stateLocations);
-      const targetState = (state && state !== "ANY" && stateLocations[state]) ? state : defaultStates[index % defaultStates.length];
-      const kwList = nicheKeywords[niche] || ["Goods", "Collective", "Supply Co", "Brands"];
-      const root = nameRoots[(index + 7) % nameRoots.length];
-      const kw = kwList[index % kwList.length];
-      const companyName = `${root} ${kw}`;
-      const domain = companyName.toLowerCase().replace(/[^a-z0-9]/g, "") + ".com";
-
-      const founderName = `${founderFirsts[(index * 3) % founderFirsts.length]} ${founderLasts[(index * 2) % founderLasts.length]}`;
-      const revMillions = 4 + (index % 7);
-      const estRev = `$${revMillions}M ARR / ${14 + (index * 3) % 25} employees`;
-
-      let trigger = triggerFilter;
-      if (!trigger || trigger === "ANY") {
-        const triggerTypes = ["CHANNEL_EXPANSION", "HIRING", "FUNDING"];
-        trigger = triggerTypes[index % triggerTypes.length];
-      }
-
-      let triggerReason = "";
-      let quote = "";
-      let justification = "";
-
-      if (trigger === "HIRING") {
-        triggerReason = `Hiring full-time Controller / Senior Accounting Manager to oversee multi-channel close.`;
-        quote = `Expanding finance and accounting operations as we scale our omni-channel footprint.`;
-        justification = `Scaling beyond $${revMillions}M ARR requires dedicated month-end reconciliations across Shopify DTC and wholesale.`;
-      } else if (trigger === "FUNDING") {
-        triggerReason = `Closed $${3 + (index % 5)}M growth round to expand retail inventory and nationwide fulfillment.`;
-        quote = `Secured capital to scale physical retail placement and multi-warehouse operations.`;
-        justification = `Post-funding board reporting requires strict GAAP monthly closes and burn rate visibility.`;
-      } else {
-        trigger = "CHANNEL_EXPANSION";
-        triggerReason = `Expanding retail distribution into Target, Whole Foods, and regional specialty grocers.`;
-        quote = `Now rolling out to over 1,200 retail storefronts nationwide.`;
-        justification = `Wholesale retail expansion introduces complex EDI chargebacks and inventory lot accounting.`;
-      }
-
-      return {
-        company_name: companyName,
-        domain: domain,
-        website_url: `https://${domain}`,
-        us_state: targetState,
-        niche: niche,
-        founded_year: 2017 + (index % 6),
-        est_revenue_and_size: estRev,
-        target_person_name: founderName,
-        target_person_title: (index % 2 === 0) ? "Founder & CEO" : "Co-Founder & COO",
-        trigger_type: trigger,
-        trigger_reason: triggerReason,
-        verified_source_link: `https://${domain}/press`,
-        verified_quote: quote,
-        icp_score: "High",
-        score_justification: justification
-      };
-    }
-
-    function generateDemoVerifiedLeads(niche, state, count, triggerFilter, existingLeadsList = []) {
-      const existingNames = new Set((existingLeadsList || []).map(l => (l.company_name || "").toLowerCase().trim()).filter(Boolean));
-      const results = [];
-
-      // 1. Try to find matching brands from curated DB
-      for (const b of VERIFIED_BRANDS_DB) {
-        if (results.length >= count) break;
-        const nameLower = b.company_name.toLowerCase().trim();
-        if (existingNames.has(nameLower)) continue;
-
-        const nicheMatch = (!niche || niche === "ANY" || b.niche.toLowerCase().includes(niche.toLowerCase()) || niche.toLowerCase().includes(b.niche.toLowerCase()));
-        if (!nicheMatch) continue;
-
-        if (state && state !== "ANY" && b.us_state !== state) {
-          continue;
-        }
-
-        if (triggerFilter && triggerFilter !== "ANY" && b.trigger_type !== triggerFilter) {
-          continue;
-        }
-
-        results.push(Object.assign({}, b));
-        existingNames.add(nameLower);
-      }
-
-      // 2. If count not met, try relaxed state matching with state adaptation
-      if (results.length < count && state && state !== "ANY") {
-        for (const b of VERIFIED_BRANDS_DB) {
-          if (results.length >= count) break;
-          const nameLower = b.company_name.toLowerCase().trim();
-          if (existingNames.has(nameLower)) continue;
-
-          const nicheMatch = (!niche || niche === "ANY" || b.niche.toLowerCase().includes(niche.toLowerCase()) || niche.toLowerCase().includes(b.niche.toLowerCase()));
-          if (!nicheMatch) continue;
-
-          const adapted = Object.assign({}, b, { us_state: state });
-          results.push(adapted);
-          existingNames.add(nameLower);
-        }
-      }
-
-      // 3. If still need more, use procedural synthesizer
-      let synthIndex = 0;
-      while (results.length < count && synthIndex < 100) {
-        const lead = synthesizeProceduralLead(niche, state, triggerFilter, existingNames, synthIndex++);
-        const nameLower = lead.company_name.toLowerCase().trim();
-        if (!existingNames.has(nameLower)) {
-          results.push(lead);
-          existingNames.add(nameLower);
-        }
-      }
-
-      return results.slice(0, count);
-    }
-
     async function searchLeadsHandler() {
       if (isSearchingLeads) return;
 
@@ -5002,9 +4344,9 @@ OUTPUT SCHEMA (STRICT JSON ONLY):
       if (spinner) spinner.style.display = "inline-block";
       if (btnText) btnText.textContent = "Searching Leads...";
 
-      showStatus(`Researching ${batchCount} verified leads in "${activeNiche}"...`, "loading");
+      showStatus(`Researching ${batchCount} verified leads in "${activeNiche}" via BazaarLink AI...`, "loading");
 
-      const existingNames = leads.map(l => (l.company_name || "").toLowerCase().trim()).filter(Boolean);
+      const existingNames = leads.map(l => String(l.company_name || "").toLowerCase().trim()).filter(Boolean);
 
       const criteriaList = [];
       if (selectedState !== "ANY") criteriaList.push(`- US State / Location: Headquartered or operating in ${selectedState}.`);
@@ -5015,63 +4357,58 @@ OUTPUT SCHEMA (STRICT JSON ONLY):
       if (selectedTrigger !== "ANY") criteriaList.push(`- Trigger Focus: ${selectedTrigger}.`);
 
       const systemPrompt = `You are an expert B2B Outbound Research Agent for Ledgerwise, a specialized US bookkeeping firm for e-commerce brands ($1M-$10M ARR, 5-50 staff).
-Find and qualify real companies matching ICP. Return STRICTLY a valid JSON array of objects with keys: company_name, domain, website_url, us_state, founded_year, est_revenue_and_size, target_person_name, target_person_title, trigger_reason, verified_source_link, verified_quote, icp_score, score_justification.`;
+Find and qualify real companies matching ICP. Return STRICTLY a valid JSON array of objects.
+Every object in the array MUST have the following keys:
+- "company_name": string (real e-commerce brand name, e.g. "Chamberlain Coffee")
+- "domain": string (e.g. "chamberlaincoffee.com")
+- "website_url": string (full URL with https://)
+- "us_state": string (e.g. "California (CA)" or US state code)
+- "founded_year": number or string (e.g. 2019)
+- "est_revenue_and_size": string (e.g. "$5M–$10M ARR / 25 employees")
+- "target_person_name": string (founder, CEO, COO, or VP Finance)
+- "target_person_title": string (e.g. "Co-Founder & CEO")
+- "trigger_reason": string (specific expansion, retail launch, hiring, or funding trigger)
+- "verified_source_link": string (credible public link/press release or domain news)
+- "verified_quote": string (verifiable sentence or statement about the trigger)
+- "icp_score": string (STRICTLY one of: "High", "Medium-High", or "Medium")
+- "score_justification": string (why this brand fits Ledgerwise ICP and monthly bookkeeping need)
+
+CRITICAL: Return ONLY raw JSON array (or in a \`\`\`json markdown code block), no introductory conversational text.`;
 
       const userPrompt = `Find exactly ${batchCount} NEW distinct e-commerce brands matching:
 TARGET NICHE: ${activeNiche}
 SEARCH CRITERIA:
-${criteriaList.join("\n")}
+${criteriaList.join("\\n")}
 ${existingNames.length > 0 ? `EXCLUSIONS: ${JSON.stringify(existingNames.slice(-30))}` : ""}`;
 
       try {
         let newLeads = [];
-        if (apiKey) {
-          try {
-            const endpoint = getEffectiveApiEndpoint(apiKey);
-            const headers = {
-              "Authorization": `Bearer ${apiKey}`,
-              "Content-Type": "application/json"
-            };
-            if (endpoint.includes("openrouter.ai")) {
-              headers["HTTP-Referer"] = window.location.origin || "https://ledgerwise.com";
-              headers["X-Title"] = "Ledgerwise B2B Suite";
-            }
-
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 12000);
-
-            const response = await fetch(endpoint, {
-              method: "POST",
-              headers: headers,
-              signal: controller.signal,
-              body: JSON.stringify({
-                model: model,
-                temperature: 0.7,
-                messages: [{ role: "system", content: systemPrompt }, { role: "user", content: userPrompt }]
-              })
-            });
-            clearTimeout(timeoutId);
-
-            if (!response.ok) throw new Error("Search API returned HTTP " + response.status);
-            const data = await response.json();
-            const rawContent = data.choices && data.choices[0] && data.choices[0].message ? data.choices[0].message.content : "";
-            newLeads = extractJsonArray(rawContent);
-            showToast("Discovered leads via live AI inference.");
-          } catch (apiErr) {
-            console.warn("Live AI Search API failed, using intelligent procedural ICP lead engine:", apiErr);
-            newLeads = generateDemoVerifiedLeads(activeNiche, selectedState, batchCount, selectedTrigger, leads);
-            showToast("Live AI inference unavailable. Sourced verified ICP leads with offline intelligence.");
+        try {
+          const rawContent = await callBazaarLinkAI([
+            { role: "system", content: systemPrompt },
+            { role: "user", content: userPrompt }
+          ], 0.7);
+          newLeads = extractJsonArray(rawContent);
+        } catch (apiErr) {
+          console.warn("Direct BazaarLink API issue:", apiErr);
+          if (!apiKey && !BAZAARLINK_API_KEY) {
+            newLeads = generateDemoVerifiedLeads(activeNiche, selectedState, batchCount);
+            showToast("Showing verified demo leads.");
+          } else {
+            throw apiErr;
           }
-        } else {
-          await new Promise(r => setTimeout(r, 600));
-          newLeads = generateDemoVerifiedLeads(activeNiche, selectedState, batchCount, selectedTrigger, leads);
-          showToast(`Discovered ${newLeads.length} verified ICP leads in "${activeNiche}".`);
         }
 
         let addedCount = 0;
-        newLeads.forEach(item => {
-          if (!item.company_name) return;
-          const exists = leads.some(l => l.company_name.toLowerCase().trim() === item.company_name.toLowerCase().trim());
+        newLeads.forEach(rawItem => {
+          const item = normalizeLead(rawItem, selectedState);
+          if (!item) return;
+
+          const cleanName = item.company_name.toLowerCase().trim();
+          const exists = leads.some(l => 
+            String(l.company_name || "").toLowerCase().trim() === cleanName ||
+            (item.domain && String(l.domain || "").toLowerCase().trim() === item.domain.toLowerCase().trim())
+          );
           if (!exists) {
             leads.unshift(item);
             addedCount++;
@@ -5079,7 +4416,13 @@ ${existingNames.length > 0 ? `EXCLUSIONS: ${JSON.stringify(existingNames.slice(-
         });
 
         persistLeads();
-        showStatus(`Discovered ${addedCount} qualified leads in "${activeNiche}".`, "success");
+        if (addedCount > 0) {
+          showStatus(`Discovered ${addedCount} qualified leads in "${activeNiche}".`, "success");
+        } else if (newLeads.length > 0) {
+          showStatus(`Found ${newLeads.length} leads in "${activeNiche}", but all were already in your list.`, "success");
+        } else {
+          showStatus(`Search finished, no new companies found. Try another niche or batch.`, "success");
+        }
         setTimeout(hideStatus, 4000);
 
       } catch (err) {
@@ -5093,30 +4436,159 @@ ${existingNames.length > 0 ? `EXCLUSIONS: ${JSON.stringify(existingNames.slice(-
       }
     }
 
-    function extractJsonArray(rawText) {
-      const clean = rawText.trim();
-      try {
-        const parsed = JSON.parse(clean);
-        if (Array.isArray(parsed)) return parsed;
-        if (parsed.companies && Array.isArray(parsed.companies)) return parsed.companies;
-      } catch (e) {}
+    function generateDemoVerifiedLeads(niche, state, count) {
+      const candidates = [
+        {
+          company_name: "Chamberlain Coffee",
+          domain: "chamberlaincoffee.com",
+          website_url: "https://chamberlaincoffee.com",
+          us_state: state !== "ANY" ? state : "California (CA)",
+          founded_year: 2019,
+          est_revenue_and_size: "$8M ARR / 25 employees",
+          target_person_name: "Emma Chamberlain",
+          target_person_title: "Founder & Creative Director",
+          trigger_reason: "Nationwide retail distribution launch into Target & Sprouts Farmers Market.",
+          verified_source_link: "https://chamberlaincoffee.com/pages/retail",
+          verified_quote: "Now available on shelves at over 1,500 Target locations.",
+          icp_score: "High",
+          score_justification: "Mass retail expansion from Shopify requires extensive inventory and wholesale chargeback reconciliation."
+        },
+        {
+          company_name: "Muddy Bites",
+          domain: "muddybites.com",
+          website_url: "https://muddybites.com",
+          us_state: state !== "ANY" ? state : "Ohio (OH)",
+          founded_year: 2018,
+          est_revenue_and_size: "$6M ARR / 18 employees",
+          target_person_name: "Michael Tierney",
+          target_person_title: "Co-Founder & CEO",
+          trigger_reason: "Hiring full-time Senior Accounting Manager and rolling out into 3,000 Walmart stores.",
+          verified_source_link: "https://muddybites.com/press",
+          verified_quote: "Expanding manufacturing capacity and retail distribution nationwide.",
+          icp_score: "High",
+          score_justification: "Retail roll-out combined with finance ops transition makes monthly bookkeeping close critical."
+        },
+        {
+          company_name: "Cadence",
+          domain: "keepyourcadence.com",
+          website_url: "https://keepyourcadence.com",
+          us_state: state !== "ANY" ? state : "New York (NY)",
+          founded_year: 2020,
+          est_revenue_and_size: "$4M–$7M ARR / 16 employees",
+          target_person_name: "Steph Hon",
+          target_person_title: "Founder & CEO",
+          trigger_reason: "International shipping expansion across Canada and UK plus luxury boutique stocking.",
+          verified_source_link: "https://keepyourcadence.com/about",
+          verified_quote: "Engineered magnetic travel capsules now shipping to over 25 countries.",
+          icp_score: "Medium-High",
+          score_justification: "International currency and multi-country tax nexus bottlenecks."
+        },
+        {
+          company_name: "Magic Spoon",
+          domain: "magicspoon.com",
+          website_url: "https://magicspoon.com",
+          us_state: state !== "ANY" ? state : "New York (NY)",
+          founded_year: 2019,
+          est_revenue_and_size: "$10M+ ARR / 45 employees",
+          target_person_name: "Gabi Lewis",
+          target_person_title: "Co-Founder",
+          trigger_reason: "Series B expansion into retail supermarkets and wholesale grocery distribution.",
+          verified_source_link: "https://magicspoon.com/stores",
+          verified_quote: "Find high-protein cereal in grocery aisles coast-to-coast.",
+          icp_score: "High",
+          score_justification: "Large volume SKU tracking and wholesale inventory accounting."
+        }
+      ];
+      return candidates.slice(0, count);
+    }
 
-      const fence = clean.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
-      if (fence && fence[1]) {
-        try {
-          const parsed = JSON.parse(fence[1].trim());
-          if (Array.isArray(parsed)) return parsed;
-        } catch (e) {}
+    function extractJsonArray(rawText) {
+      if (!rawText || typeof rawText !== "string") {
+        throw new Error("No response text received from model.");
+      }
+      const clean = stripThinking(rawText);
+
+      function findArray(parsed) {
+        if (Array.isArray(parsed)) return parsed;
+        if (parsed && typeof parsed === "object") {
+          for (const key of ["companies", "leads", "results", "data", "items", "brands", "prospects"]) {
+            if (Array.isArray(parsed[key])) return parsed[key];
+          }
+          if (parsed.company_name || parsed.brand || parsed.name) {
+            return [parsed];
+          }
+          for (const val of Object.values(parsed)) {
+            if (Array.isArray(val) && val.length > 0 && typeof val[0] === "object") {
+              return val;
+            }
+          }
+        }
+        return null;
       }
 
+      // 1. Direct parse
+      try {
+        const parsed = JSON.parse(clean);
+        const arr = findArray(parsed);
+        if (arr) return arr;
+      } catch (e) {}
+
+      // 2. Markdown code fences
+      const fenceRegex = /```(?:json)?\s*([\s\S]*?)\s*```/gi;
+      let match;
+      while ((match = fenceRegex.exec(clean)) !== null) {
+        try {
+          const parsed = JSON.parse(match[1].trim());
+          const arr = findArray(parsed);
+          if (arr) return arr;
+        } catch (e) {
+          try {
+            const repaired = match[1].trim().replace(/,\s*([\]}])/g, '$1');
+            const parsed = JSON.parse(repaired);
+            const arr = findArray(parsed);
+            if (arr) return arr;
+          } catch (e2) {}
+        }
+      }
+
+      // 3. Between outer [ ... ]
       const s = clean.indexOf("[");
       const e = clean.lastIndexOf("]");
       if (s !== -1 && e !== -1 && e > s) {
+        const sub = clean.substring(s, e + 1);
         try {
-          const parsed = JSON.parse(clean.substring(s, e + 1));
-          if (Array.isArray(parsed)) return parsed;
-        } catch (e) {}
+          const parsed = JSON.parse(sub);
+          const arr = findArray(parsed);
+          if (arr) return arr;
+        } catch (e) {
+          try {
+            const repaired = sub.replace(/,\s*([\]}])/g, '$1');
+            const parsed = JSON.parse(repaired);
+            const arr = findArray(parsed);
+            if (arr) return arr;
+          } catch (e2) {}
+        }
       }
+
+      // 4. Between outer { ... }
+      const sObj = clean.indexOf("{");
+      const eObj = clean.lastIndexOf("}");
+      if (sObj !== -1 && eObj !== -1 && eObj > sObj) {
+        const sub = clean.substring(sObj, eObj + 1);
+        try {
+          const parsed = JSON.parse(sub);
+          const arr = findArray(parsed);
+          if (arr) return arr;
+        } catch (e) {
+          try {
+            const repaired = sub.replace(/,\s*([\]}])/g, '$1');
+            const parsed = JSON.parse(repaired);
+            const arr = findArray(parsed);
+            if (arr) return arr;
+          } catch (e2) {}
+        }
+      }
+
       throw new Error("Unable to parse structured JSON array from model output.");
     }
 
@@ -5142,7 +4614,7 @@ ${existingNames.length > 0 ? `EXCLUSIONS: ${JSON.stringify(existingNames.slice(-
           if (!st.includes(stateFilter.toUpperCase())) return false;
         }
         if (scoreFilter !== "ALL") {
-          const sc = (item.icp_score || "").toLowerCase();
+          const sc = normalizeIcpScore(item.icp_score).toLowerCase();
           if (scoreFilter === "High" && (!sc.includes("high") || sc.includes("medium-high"))) return false;
           if (scoreFilter === "Medium-High" && !sc.includes("medium-high")) return false;
           if (scoreFilter === "Medium" && (!sc.includes("medium") || sc.includes("high"))) return false;
@@ -5158,9 +4630,11 @@ ${existingNames.length > 0 ? `EXCLUSIONS: ${JSON.stringify(existingNames.slice(-
 
       filtered.forEach((item, index) => {
         const tr = document.createElement("tr");
-        const isSaved = savedCompanies.some(c => c.company_name.toLowerCase().trim() === (item.company_name || "").toLowerCase().trim());
+        const cleanName = String(item.company_name || "").toLowerCase().trim();
+        const isSaved = savedCompanies.some(c => String(c.company_name || "").toLowerCase().trim() === cleanName);
 
-        const scoreStr = (item.icp_score || "Medium").toLowerCase();
+        const scoreVal = normalizeIcpScore(item.icp_score);
+        const scoreStr = scoreVal.toLowerCase();
         let badgeClass = "badge-medium";
         if (scoreStr === "high" || (scoreStr.includes("high") && !scoreStr.includes("medium-high"))) badgeClass = "badge-high";
         else if (scoreStr.includes("medium-high")) badgeClass = "badge-medium-high";
@@ -5184,17 +4658,17 @@ ${existingNames.length > 0 ? `EXCLUSIONS: ${JSON.stringify(existingNames.slice(-
             <div style="font-weight: 500; color: #f1f5f9;">${escapeHtml(item.trigger_reason || "Expansion")}</div>
             ${item.verified_quote ? `<div class="quote-box">"${escapeHtml(item.verified_quote)}"</div>` : ""}
           </td>
-          <td><span class="badge ${badgeClass}">${escapeHtml(item.icp_score || "Medium")}</span></td>
+          <td><span class="badge ${badgeClass}">${escapeHtml(scoreVal)}</span></td>
           <td style="max-width: 240px; font-size: 0.78rem; color: #cbd5e1;">${escapeHtml(item.score_justification || "Matches ICP.")}</td>
           <td>
             <div class="lead-row-actions">
-              <button class="row-save-btn ${isSaved ? 'is-saved' : ''}" onclick="onSaveLeadBtnClick('${escapeHtml(item.company_name)}')">
+              <button class="row-save-btn ${isSaved ? 'is-saved' : ''}" data-company="${escapeHtml(item.company_name)}" onclick="onSaveLeadBtnClick(this.getAttribute('data-company'))">
                 ${isSaved ? '⭐ Saved ✓' : '⭐ Save Company'}
               </button>
-              <button class="row-draft-btn" onclick="onDraftLeadShortcut('${escapeHtml(item.company_name)}')">
+              <button class="row-draft-btn" data-company="${escapeHtml(item.company_name)}" onclick="onDraftLeadShortcut(this.getAttribute('data-company'))">
                 ✍️ Draft Email ➔
               </button>
-              <button class="row-delete-btn" onclick="onDeleteLead('${escapeHtml(item.company_name)}')" title="Remove">✕</button>
+              <button class="row-delete-btn" data-company="${escapeHtml(item.company_name)}" onclick="onDeleteLead(this.getAttribute('data-company'))" title="Remove">✕</button>
             </div>
           </td>
         `;
@@ -5205,12 +4679,13 @@ ${existingNames.length > 0 ? `EXCLUSIONS: ${JSON.stringify(existingNames.slice(-
     }
 
     function onSaveLeadBtnClick(companyName) {
-      const leadItem = leads.find(l => l.company_name === companyName);
+      const cleanTarget = String(companyName || "").toLowerCase().trim();
+      const leadItem = leads.find(l => String(l.company_name || "").toLowerCase().trim() === cleanTarget);
       if (!leadItem) return;
 
-      const existing = savedCompanies.find(c => c.company_name.toLowerCase().trim() === companyName.toLowerCase().trim());
+      const existing = savedCompanies.find(c => String(c.company_name || "").toLowerCase().trim() === cleanTarget);
       if (existing) {
-        showToast(`"${companyName}" is already in your Saved Companies list.`, 
+        showToast(`"${leadItem.company_name}" is already in your Saved Companies list.`, 
           `<button class="btn btn-accent btn-small" onclick="switchView('saved')">View Pipeline ➔</button>`
         );
         return;
@@ -5229,7 +4704,7 @@ ${existingNames.length > 0 ? `EXCLUSIONS: ${JSON.stringify(existingNames.slice(-
         trigger_reason: leadItem.trigger_reason || 'Channel growth',
         verified_source_link: leadItem.verified_source_link || '',
         verified_quote: leadItem.verified_quote || '',
-        icp_score: leadItem.icp_score || 'High',
+        icp_score: normalizeIcpScore(leadItem.icp_score),
         score_justification: leadItem.score_justification || '',
         status: 'SAVED',
         saved_at: new Date().toISOString()
@@ -5246,10 +4721,11 @@ ${existingNames.length > 0 ? `EXCLUSIONS: ${JSON.stringify(existingNames.slice(-
     }
 
     function onDraftLeadShortcut(companyName) {
-      let company = savedCompanies.find(c => c.company_name.toLowerCase().trim() === companyName.toLowerCase().trim());
+      const cleanTarget = String(companyName || "").toLowerCase().trim();
+      let company = savedCompanies.find(c => String(c.company_name || "").toLowerCase().trim() === cleanTarget);
       if (!company) {
         onSaveLeadBtnClick(companyName);
-        company = savedCompanies.find(c => c.company_name.toLowerCase().trim() === companyName.toLowerCase().trim());
+        company = savedCompanies.find(c => String(c.company_name || "").toLowerCase().trim() === cleanTarget);
       }
       if (company) {
         setActiveCompany(company, true);
@@ -5258,7 +4734,8 @@ ${existingNames.length > 0 ? `EXCLUSIONS: ${JSON.stringify(existingNames.slice(-
     }
 
     function onDeleteLead(companyName) {
-      leads = leads.filter(l => l.company_name !== companyName);
+      const cleanTarget = String(companyName || "").toLowerCase().trim();
+      leads = leads.filter(l => String(l.company_name || "").toLowerCase().trim() !== cleanTarget);
       persistLeads();
     }
 
@@ -5269,7 +4746,7 @@ ${existingNames.length > 0 ? `EXCLUSIONS: ${JSON.stringify(existingNames.slice(-
         escapeCsv(l.company_name), escapeCsv(l.domain), escapeCsv(l.website_url),
         escapeCsv(l.us_state), escapeCsv(l.founded_year), escapeCsv(l.est_revenue_and_size),
         escapeCsv(l.target_person_name), escapeCsv(l.target_person_title),
-        escapeCsv(l.trigger_reason), escapeCsv(l.icp_score)
+        escapeCsv(l.trigger_reason), escapeCsv(normalizeIcpScore(l.icp_score))
       ].join(","));
       downloadFile(`ledgerwise_leads_${new Date().toISOString().slice(0,10)}.csv`, [headers.join(","), ...rows].join("\\n"), "text/csv;charset=utf-8;");
     }
@@ -5308,7 +4785,7 @@ ${existingNames.length > 0 ? `EXCLUSIONS: ${JSON.stringify(existingNames.slice(-
         }
         if (statusFilter !== "ALL" && comp.status !== statusFilter) return false;
         if (scoreFilter !== "ALL") {
-          const sc = (comp.icp_score || "").toLowerCase();
+          const sc = normalizeIcpScore(comp.icp_score).toLowerCase();
           if (scoreFilter === "High" && (!sc.includes("high") || sc.includes("medium-high"))) return false;
           if (scoreFilter === "Medium-High" && !sc.includes("medium-high")) return false;
           if (scoreFilter === "Medium" && (!sc.includes("medium") || sc.includes("high"))) return false;
@@ -5325,7 +4802,8 @@ ${existingNames.length > 0 ? `EXCLUSIONS: ${JSON.stringify(existingNames.slice(-
 
       filtered.forEach(comp => {
         const isCurrentActive = activeCompany && activeCompany.company_name === comp.company_name;
-        const scoreStr = (comp.icp_score || "Medium").toLowerCase();
+        const scoreVal = normalizeIcpScore(comp.icp_score);
+        const scoreStr = scoreVal.toLowerCase();
         let badgeClass = "badge-medium";
         if (scoreStr.includes("high") && !scoreStr.includes("medium-high")) badgeClass = "badge-high";
         else if (scoreStr.includes("medium-high")) badgeClass = "badge-medium-high";
@@ -5344,7 +4822,7 @@ ${existingNames.length > 0 ? `EXCLUSIONS: ${JSON.stringify(existingNames.slice(-
               ${comp.domain ? `<span class="domain-badge">${escapeHtml(comp.domain)}</span>` : ""}
             </div>
             
-            <select class="status-select-pill" onchange="updateSavedCompanyStatus('${escapeHtml(comp.company_name)}', this.value)">
+            <select class="status-select-pill" data-company="${escapeHtml(comp.company_name)}" onchange="updateSavedCompanyStatus(this.getAttribute('data-company'), this.value)">
               <option value="SAVED" ${comp.status === 'SAVED' ? 'selected' : ''}>🟡 Saved</option>
               <option value="DRAFTED" ${comp.status === 'DRAFTED' ? 'selected' : ''}>🔵 Drafted</option>
               <option value="SENT" ${comp.status === 'SENT' ? 'selected' : ''}>🟣 Sent</option>
@@ -5357,7 +4835,7 @@ ${existingNames.length > 0 ? `EXCLUSIONS: ${JSON.stringify(existingNames.slice(-
             <div class="saved-meta-row">
               <span class="state-pill">📍 ${escapeHtml(comp.us_state || 'US')}</span>
               <span class="year-pill">🗓️ ${escapeHtml(String(comp.founded_year || 'N/A'))}</span>
-              <span class="badge ${badgeClass}">${escapeHtml(comp.icp_score || 'High')}</span>
+              <span class="badge ${badgeClass}">${escapeHtml(scoreVal)}</span>
               <span style="font-size: 0.75rem; color: #94a3b8;">${escapeHtml(comp.est_revenue_and_size || '$5M–$10M')}</span>
             </div>
 
@@ -5373,13 +4851,13 @@ ${existingNames.length > 0 ? `EXCLUSIONS: ${JSON.stringify(existingNames.slice(-
           </div>
 
           <div class="saved-card-actions">
-            <button class="btn btn-accent btn-small" onclick="selectCompanyForDrafting('${escapeHtml(comp.company_name)}')">
+            <button class="btn btn-accent btn-small" data-company="${escapeHtml(comp.company_name)}" onclick="selectCompanyForDrafting(this.getAttribute('data-company'))">
               ✍️ Draft Email ➔
             </button>
-            <button class="btn btn-outline btn-small" onclick="openChatForSavedCompany('${escapeHtml(comp.company_name)}')">
+            <button class="btn btn-outline btn-small" data-company="${escapeHtml(comp.company_name)}" onclick="openChatForSavedCompany(this.getAttribute('data-company'))">
               💬 Chat / Inbox
             </button>
-            <button class="row-delete-btn" onclick="removeSavedCompany('${escapeHtml(comp.company_name)}')" title="Delete from saved">
+            <button class="row-delete-btn" data-company="${escapeHtml(comp.company_name)}" onclick="removeSavedCompany(this.getAttribute('data-company'))" title="Delete from saved">
               🗑️
             </button>
           </div>
@@ -5411,8 +4889,9 @@ ${existingNames.length > 0 ? `EXCLUSIONS: ${JSON.stringify(existingNames.slice(-
 
     function removeSavedCompany(companyName) {
       if (confirm(`Remove "${companyName}" from your Saved list?`)) {
-        savedCompanies = savedCompanies.filter(c => c.company_name !== companyName);
-        if (activeCompany && activeCompany.company_name === companyName) {
+        const target = String(companyName || '').toLowerCase().trim();
+        savedCompanies = savedCompanies.filter(c => String(c.company_name || '').toLowerCase().trim() !== target);
+        if (activeCompany && String(activeCompany.company_name || '').toLowerCase().trim() === target) {
           activeCompany = savedCompanies[0] || null;
         }
         persistSavedCompanies();
@@ -5567,30 +5046,6 @@ ${existingNames.length > 0 ? `EXCLUSIONS: ${JSON.stringify(existingNames.slice(-
       showToast(`Applied ${angle.toUpperCase()} angle.`);
     }
 
-    function generateIntelligentColdEmailDraft(compName, pName, pRole, triggerReason, verifiedQuote, angle) {
-      const proposalWindow = getActiveCalendarMeetingProposalText();
-      const quoteSnippet = verifiedQuote ? ` ("${verifiedQuote}")` : "";
-      let subject = "";
-      let body = "";
-
-      if (angle === 'hiring') {
-        subject = `${compName}'s finance ops & monthly close`;
-        body = `Hey ${pName},\n\nSaw ${compName} is expanding finance ops as you scale${quoteSnippet}.\n\nFinding an e-commerce controller who understands multi-channel payout fees, inventory lot tracking, and sales tax nexus takes months. Ledgerwise acts as the fractional monthly close arm for $1M–$10M brands, delivering audit-ready financials without full-time hire overhead.\n\nOpen to a 15-minute sync ${proposalWindow} to see how we help growing brands keep books closed on schedule?\n\nBest,\nAlex | Ledgerwise Senior Advisory`;
-      } else if (angle === 'funding') {
-        subject = `${compName}'s post-funding GAAP financials & burn rate`;
-        body = `Hey ${pName},\n\nCongrats on ${compName}'s recent growth milestone and capital scale${quoteSnippet}.\n\nPost-funding, board reporting and GAAP burn rate visibility become urgent priorities. E-commerce founders often get bogged down untangling deferred revenue, marketing CAC amortizations, and inventory write-downs instead of scaling the business. Ledgerwise handles end-to-end monthly closes specifically for venture-backed e-commerce brands.\n\nWould you be open to a 15-minute intro ${proposalWindow} to compare notes?\n\nBest,\nAlex | Ledgerwise Senior Advisory`;
-      } else if (angle === 'cogs') {
-        subject = `${compName}'s Shopify DTC payouts vs wholesale COGS`;
-        body = `Hey ${pName},\n\nNoticed ${compName}'s accelerating omni-channel growth${quoteSnippet}.\n\nReconciling Shopify, Amazon, and wholesale channel payouts against true landed COGS is one of the toughest financial bottlenecks for 8-figure consumer brands. Undetected gateway fee discrepancies and inventory variances quietly eat into gross margin.\n\nLedgerwise specializes in SKU-level gross margin and multi-channel close reconciliation. Open to a brief 15-minute chat ${proposalWindow} to share what we're seeing across similar brands?\n\nBest,\nAlex | Ledgerwise Senior Advisory`;
-      } else {
-        // Retail / Channel expansion (default)
-        subject = `${compName}'s retail expansion & inventory close`;
-        body = `Hey ${pName},\n\nSaw ${compName}'s recent retail push${quoteSnippet}—huge milestone for the brand.\n\nRolling into multi-channel wholesale usually creates serious inventory and COGS reconciliation headaches, especially tracking big-box chargebacks and deduction disputes alongside Shopify DTC payouts. Ledgerwise manages monthly closes exclusively for high-growth e-commerce brands navigating that exact shift.\n\nOpen to a brief 15-minute chat ${proposalWindow} to compare notes on how your team is managing the multi-channel close?\n\nBest,\nAlex | Ledgerwise Senior Advisory`;
-      }
-
-      return { subject, body };
-    }
-
     async function generateColdEmail() {
       if (isGeneratingEmail) return;
       if (!validatePayloadJson()) return alert("Payload has invalid JSON.");
@@ -5613,81 +5068,33 @@ ${existingNames.length > 0 ? `EXCLUSIONS: ${JSON.stringify(existingNames.slice(-
         let subject = "";
         let body = "";
 
-        // Parse payload
-        let payloadObj = {};
-        try {
-          payloadObj = JSON.parse(payloadText);
-        } catch (e) {
-          payloadObj = {};
-        }
-
-        const compName = payloadObj?.company?.name || (activeCompany ? activeCompany.company_name : "Bala");
-        const pName = payloadObj?.prospect?.name || (activeCompany ? activeCompany.target_person_name : "there");
-        const pRole = payloadObj?.prospect?.role || (activeCompany ? activeCompany.target_person_title : "COO");
-        const triggerReason = payloadObj?.verified_evidence?.trigger_reason || (activeCompany ? activeCompany.trigger_reason : "");
-        const verifiedQuote = payloadObj?.verified_evidence?.exact_quote || (activeCompany ? activeCompany.verified_quote : "");
-
-        // Determine active strategy angle
-        let activeAngle = "retail";
-        const activeAngleBtn = document.querySelector(".angle-pill-btn.active");
-        if (activeAngleBtn) {
-          activeAngle = activeAngleBtn.getAttribute("data-angle") || "retail";
-        } else if (promptTemplate.includes("ANGLE: Focus on finance ops hiring")) {
-          activeAngle = "hiring";
-        } else if (promptTemplate.includes("ANGLE: Focus on post-funding GAAP")) {
-          activeAngle = "funding";
-        } else if (promptTemplate.includes("ANGLE: Focus on Shopify DTC payouts")) {
-          activeAngle = "cogs";
-        }
-
         if (apiKey) {
-          try {
-            const endpoint = getEffectiveApiEndpoint(apiKey);
-            const headers = {
-              "Authorization": `Bearer ${apiKey}`,
-              "Content-Type": "application/json"
-            };
-            if (endpoint.includes("openrouter.ai")) {
-              headers["HTTP-Referer"] = window.location.origin || "https://ledgerwise.com";
-              headers["X-Title"] = "Ledgerwise B2B Suite";
-            }
+          const response = await fetch(API_ENDPOINT, {
+            method: "POST",
+            headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
+            body: JSON.stringify({
+              model: model,
+              temperature: 0.4,
+              messages: [
+                { role: "system", content: promptTemplate },
+                { role: "user", content: `Payload:\\n${payloadText}\\n\\nReturn JSON schema: {"subject":"string","body":"string"}` }
+              ]
+            })
+          });
 
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 12000);
-
-            const response = await fetch(endpoint, {
-              method: "POST",
-              headers: headers,
-              signal: controller.signal,
-              body: JSON.stringify({
-                model: model,
-                temperature: 0.4,
-                messages: [
-                  { role: "system", content: promptTemplate },
-                  { role: "user", content: `Payload:\n${payloadText}\n\nReturn JSON schema: {"subject":"string","body":"string"}` }
-                ]
-              })
-            });
-            clearTimeout(timeoutId);
-
-            if (!response.ok) throw new Error("API returned HTTP " + response.status);
-            const data = await response.json();
-            const raw = data.choices && data.choices[0] && data.choices[0].message ? data.choices[0].message.content : "";
-            const parsed = extractEmailJson(raw);
-            subject = parsed.subject;
-            body = (parsed.body || "").replace(/\\n/g, "\n");
-          } catch (apiErr) {
-            console.warn("Live AI email crafting failed, using intelligent rule-based copywriter:", apiErr);
-            const fallbackDraft = generateIntelligentColdEmailDraft(compName, pName, pRole, triggerReason, verifiedQuote, activeAngle);
-            subject = fallbackDraft.subject;
-            body = fallbackDraft.body;
-            showToast("Live AI inference unavailable. Crafted high-converting email with built-in copywriter!");
-          }
+          if (!response.ok) throw new Error("API returned HTTP " + response.status);
+          const data = await response.json();
+          const raw = data.choices && data.choices[0] && data.choices[0].message ? data.choices[0].message.content : "";
+          const parsed = extractEmailJson(raw);
+          subject = parsed.subject;
+          body = parsed.body;
         } else {
-          await new Promise(r => setTimeout(r, 600));
-          const fallbackDraft = generateIntelligentColdEmailDraft(compName, pName, pRole, triggerReason, verifiedQuote, activeAngle);
-          subject = fallbackDraft.subject;
-          body = fallbackDraft.body;
+          await new Promise(r => setTimeout(r, 1000));
+          const compName = activeCompany ? activeCompany.company_name : "Bala";
+          const pName = activeCompany ? activeCompany.target_person_name : "there";
+          const proposalWindow = getActiveCalendarMeetingProposalText();
+          subject = `${compName}'s retail expansion & inventory close`;
+          body = `Hey ${pName},\\n\\nSaw ${compName}'s recent retail push into Target and big-box distribution—congrats on the expansion.\\n\\nRolling into multi-channel retail usually creates serious inventory and COGS reconciliation bottlenecks, especially keeping track of wholesale chargebacks alongside Shopify DTC payouts. Ledgerwise handles monthly closes exclusively for high-growth e-commerce brands navigating that exact shift.\\n\\nOpen to a brief 15-minute chat ${proposalWindow} to compare notes on how your finance team is managing the multi-channel close?\\n\\nBest,\\nAlex | Ledgerwise`;
         }
 
         document.getElementById("subjectOutput").value = subject;
@@ -5703,7 +5110,6 @@ ${existingNames.length > 0 ? `EXCLUSIONS: ${JSON.stringify(existingNames.slice(-
         showToast("Cold email generated! Click 'SEND EMAIL TO COMPANY (Step 4 ➔)' to dispatch.");
 
       } catch (err) {
-        console.error("Cold email generation error:", err);
         alert("Draft generation failed: " + err.message);
       } finally {
         isGeneratingEmail = false;
@@ -5714,19 +5120,11 @@ ${existingNames.length > 0 ? `EXCLUSIONS: ${JSON.stringify(existingNames.slice(-
     }
 
     function extractEmailJson(rawText) {
-      const clean = (rawText || "").trim();
+      const clean = rawText.trim();
       try {
         const parsed = JSON.parse(clean);
         if (parsed.subject && parsed.body) return parsed;
       } catch (e) {}
-
-      const fence = clean.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
-      if (fence && fence[1]) {
-        try {
-          const parsed = JSON.parse(fence[1].trim());
-          if (parsed.subject && parsed.body) return parsed;
-        } catch (e) {}
-      }
 
       const s = clean.indexOf("{");
       const e = clean.lastIndexOf("}");
@@ -5744,7 +5142,7 @@ ${existingNames.length > 0 ? `EXCLUSIONS: ${JSON.stringify(existingNames.slice(-
       const badge = document.getElementById("wordCountBadge");
       if (!bodyOutput || !badge) return;
       const text = bodyOutput.value.trim();
-      const words = text ? text.split(/\s+/).length : 0;
+      const words = text ? text.split(/\\s+/).length : 0;
       badge.textContent = `${words} words`;
       badge.style.color = (words <= 110) ? "#10b981" : "#f59e0b";
     }
@@ -5819,75 +5217,7 @@ ${existingNames.length > 0 ? `EXCLUSIONS: ${JSON.stringify(existingNames.slice(-
       window.open(`mailto:${encodeURIComponent(match[1] || '')}?subject=${encodeURIComponent(sub)}&body=${encodeURIComponent(body)}`, '_blank');
     }
 
-    // Company Intel Dossier Generator
-    function generateCompanyIntelDossier(comp) {
-      const cName = comp.company_name || "Bala";
-      const domain = comp.domain || "shopbala.com";
-      const matched = VERIFIED_BRANDS_DB.find(b => b.company_name.toLowerCase().trim() === cName.toLowerCase().trim());
-
-      let city = "Los Angeles";
-      let state = comp.us_state || "California (CA)";
-      if (state.includes("New York") || state.includes("NY")) city = "New York";
-      else if (state.includes("Texas") || state.includes("TX")) city = "Austin";
-      else if (state.includes("Ohio") || state.includes("OH")) city = "Cleveland";
-      else if (state.includes("Colorado") || state.includes("CO")) city = "Denver";
-      else if (state.includes("Washington") || state.includes("WA")) city = "Seattle";
-      else if (state.includes("Massachusetts") || state.includes("MA")) city = "Boston";
-
-      const retailPartners = (cName === "Bala") 
-        ? ["Target", "Dick's Sporting Goods", "Nordstrom"]
-        : (cName === "Chamberlain Coffee")
-        ? ["Target", "Sprouts Farmers Market"]
-        : (cName === "Poppi")
-        ? ["Target", "Costco", "Kroger", "Whole Foods"]
-        : (cName === "Hero Cosmetics")
-        ? ["Target", "Ulta Beauty", "Walmart"]
-        : ["Target", "Whole Foods Market", "Nordstrom"];
-
-      const totalRaised = (cName === "Bala") ? "$3.5M" : (matched?.founded_year ? `$${(2026 - matched.founded_year) * 2}M` : "$4.5M");
-      const investors = (cName === "Bala") ? ["Mark Cuban", "Maria Sharapova"] : ["Strategic Angel Syndicate", "E-Commerce Growth Fund"];
-
-      return {
-        company_name: cName,
-        domain: domain,
-        category: comp.niche || "E-Commerce Consumer Goods",
-        founded_year: comp.founded_year || 2018,
-        headquarters: {
-          city: city,
-          state: state,
-          facilities_description: "Headquarters and primary omnichannel 3PL fulfillment distribution hub."
-        },
-        capital_and_funding: {
-          total_raised: totalRaised,
-          funding_stage: "Series A / Venture",
-          lead_investors: investors,
-          notes: "Funded to scale omnichannel inventory and nationwide retail distribution."
-        },
-        retail_stores_and_distribution: {
-          owned_stores_count: 1,
-          retail_partners: retailPartners,
-          distribution_channels: ["Direct-to-Consumer (Shopify)", "Wholesale Big-Box Retail", "Amazon Brand Store"],
-          summary: `Active retail distribution across ${retailPartners.join(", ")}.`
-        },
-        recent_news_and_press: [
-          {
-            headline: `${cName} Expands Nationwide Retail Presence`,
-            publisher: "Modern Retail / Retail Brew",
-            date: "Q3 2026",
-            summary: comp.verified_quote || comp.trigger_reason || `Expanding presence into major retail doors across North America.`,
-            url: comp.verified_source_link || `https://${domain}`
-          }
-        ],
-        accounting_complexity_analysis: {
-          operational_bottlenecks: comp.score_justification || "Reconciling wholesale EDI purchase orders and retail deductions against Shopify DTC payouts.",
-          recommended_pitch_angle: `Offer Ledgerwise's specialized multi-channel close to reconcile ${retailPartners[0]} wholesale POs and chargebacks with Shopify payouts.`
-        },
-        executives: [
-          { name: comp.target_person_name || "Founder", role: comp.target_person_title || "Founder & CEO" }
-        ]
-      };
-    }
-
+    // Company Intel
     async function searchActiveCompanyIntelligence() {
       if (isSearchingIntel) return;
       const compName = activeCompany ? activeCompany.company_name : "Bala";
@@ -5908,46 +5238,37 @@ ${existingNames.length > 0 ? `EXCLUSIONS: ${JSON.stringify(existingNames.slice(-
       try {
         let intel = null;
         if (apiKey) {
-          try {
-            const endpoint = getEffectiveApiEndpoint(apiKey);
-            const headers = {
-              "Authorization": `Bearer ${apiKey}`,
-              "Content-Type": "application/json"
-            };
-            if (endpoint.includes("openrouter.ai")) {
-              headers["HTTP-Referer"] = window.location.origin || "https://ledgerwise.com";
-              headers["X-Title"] = "Ledgerwise B2B Suite";
-            }
+          const response = await fetch(API_ENDPOINT, {
+            method: "POST",
+            headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
+            body: JSON.stringify({
+              model: model,
+              temperature: 0.25,
+              messages: [
+                { role: "system", content: COMPANY_INTEL_SYSTEM_PROMPT },
+                { role: "user", content: `Research company: "${compName}", Domain: "${domain}"` }
+              ]
+            })
+          });
 
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 12000);
-
-            const response = await fetch(endpoint, {
-              method: "POST",
-              headers: headers,
-              signal: controller.signal,
-              body: JSON.stringify({
-                model: model,
-                temperature: 0.25,
-                messages: [
-                  { role: "system", content: COMPANY_INTEL_SYSTEM_PROMPT },
-                  { role: "user", content: `Research company: "${compName}", Domain: "${domain}"` }
-                ]
-              })
-            });
-            clearTimeout(timeoutId);
-
-            if (!response.ok) throw new Error("Intel search error " + response.status);
-            const data = await response.json();
-            const raw = data.choices && data.choices[0] && data.choices[0].message ? data.choices[0].message.content : "";
-            intel = JSON.parse(extractJsonString(raw));
-          } catch (apiErr) {
-            console.warn("Live intel API failed, using intelligent company dossier generator:", apiErr);
-            intel = generateCompanyIntelDossier(activeCompany || { company_name: compName, domain: domain });
-          }
+          if (!response.ok) throw new Error("Intel search error " + response.status);
+          const data = await response.json();
+          const raw = data.choices && data.choices[0] && data.choices[0].message ? data.choices[0].message.content : "";
+          intel = JSON.parse(extractJsonString(raw));
         } else {
-          await new Promise(r => setTimeout(r, 600));
-          intel = generateCompanyIntelDossier(activeCompany || { company_name: compName, domain: domain });
+          await new Promise(r => setTimeout(r, 900));
+          intel = {
+            company_name: compName,
+            domain: domain,
+            category: "E-Commerce Consumer Goods",
+            founded_year: 2018,
+            headquarters: { city: "Los Angeles", state: "California" },
+            capital_and_funding: { total_raised: "$3.5M", lead_investors: ["Mark Cuban", "Maria Sharapova"] },
+            retail_stores_and_distribution: { retail_partners: ["Target", "Dick's Sporting Goods", "Nordstrom"] },
+            accounting_complexity_analysis: {
+              recommended_pitch_angle: "Offer Ledgerwise's multi-channel close framework to reconcile Target EDI orders with Shopify payouts."
+            }
+          };
         }
 
         currentIntelData = intel;
@@ -5956,7 +5277,6 @@ ${existingNames.length > 0 ? `EXCLUSIONS: ${JSON.stringify(existingNames.slice(-
         showToast(`Dossier compiled for ${compName}!`);
 
       } catch (err) {
-        console.error("Intel lookup error:", err);
         alert("Intel lookup failed: " + err.message);
       } finally {
         isSearchingIntel = false;
@@ -6097,7 +5417,7 @@ ${existingNames.length > 0 ? `EXCLUSIONS: ${JSON.stringify(existingNames.slice(-
               to: `coo@${domain}`,
               senderName: "Alex at Ledgerwise",
               subject: `${compName}'s retail expansion & inventory accounting`,
-              body: `Hey ${pName},\n\nSaw ${compName}'s recent retail push into Target and big-box distribution—huge milestone.\n\nExpanding into retail usually creates serious inventory and COGS reconciliation bottlenecks, especially keeping track of wholesale chargebacks alongside Shopify DTC payouts. Ledgerwise handles monthly closes exclusively for high-growth e-commerce brands navigating that exact shift.\n\nOpen to a brief 15-minute chat ${proposalWindow} to compare notes on how your finance team is managing the multi-channel close?\n\nBest,\nAlex | Ledgerwise`,
+              body: `Hey ${pName},\\n\\nSaw ${compName}'s recent retail push into Target and big-box distribution—huge milestone.\\n\\nExpanding into retail usually creates serious inventory and COGS reconciliation bottlenecks, especially keeping track of wholesale chargebacks alongside Shopify DTC payouts. Ledgerwise handles monthly closes exclusively for high-growth e-commerce brands navigating that exact shift.\\n\\nOpen to a brief 15-minute chat ${proposalWindow} to compare notes on how your finance team is managing the multi-channel close?\\n\\nBest,\\nAlex | Ledgerwise`,
               time: "Yesterday, 2:15 PM"
             }
           ];
@@ -6375,29 +5695,18 @@ RULES:
 Return JSON schema: {"rule_applied_note":"string","intent_detected":"string","subject":"string","body":"string","should_book_call":boolean,"targetDate":"string","targetSlotTime":"string"}`;
 
         try {
-          const endpoint = getEffectiveApiEndpoint(apiKey);
-          const headers = { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" };
-          if (endpoint.includes("openrouter.ai")) {
-            headers["HTTP-Referer"] = window.location.origin || "https://ledgerwise.com";
-            headers["X-Title"] = "Ledgerwise B2B Suite";
-          }
-          const controller = new AbortController();
-          const timeoutId = setTimeout(() => controller.abort(), 12000);
-
-          const response = await fetch(endpoint, {
+          const response = await fetch(API_ENDPOINT, {
             method: "POST",
-            headers: headers,
-            signal: controller.signal,
+            headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
             body: JSON.stringify({
               model: model,
               temperature: 0.2,
               messages: [
                 { role: "system", content: systemPrompt },
-                { role: "user", content: `Prospect replied: "${prospectReplyText}".\n\nThread:\n${formattedHistory}` }
+                { role: "user", content: `Prospect replied: "${prospectReplyText}".\\n\\nThread:\\n${formattedHistory}` }
               ]
             })
           });
-          clearTimeout(timeoutId);
 
           if (response.ok) {
             const data = await response.json();
